@@ -1,0 +1,7 @@
+**/.claude/settings.local.json
+~/DevCloud/.gitignore_global
+node_modules
+*.mp4
+*.mp3
+*.zip
+*.aab
