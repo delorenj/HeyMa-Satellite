@@ -3,3 +3,7 @@
 
 [env]
 _.file = ".env"
+
+[tasks.fetch-deps]
+description = "Initialize and update git submodule dependencies"
+run = "git submodule update --init --recursive"

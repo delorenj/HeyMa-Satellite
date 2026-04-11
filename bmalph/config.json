@@ -1,0 +1,9 @@
+{
+  "name": "TonnyBox",
+  "description": "He's Tonny",
+  "createdAt": "2026-03-25T18:20:54.066Z",
+  "platform": "claude-code",
+  "upstreamVersions": {
+    "bmadCommit": "d1163f85"
+  }
+}

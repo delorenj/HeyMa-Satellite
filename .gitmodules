@@ -1,0 +1,12 @@
+[submodule "deps/wyoming-openwakeword"]
+	path = deps/wyoming-openwakeword
+	url = https://github.com/rhasspy/wyoming-openwakeword.git
+[submodule "deps/seeed-voicecard"]
+	path = deps/seeed-voicecard
+	url = https://github.com/HinTak/seeed-voicecard
+[submodule "deps/seeed-linux-dtoverlays"]
+	path = deps/seeed-linux-dtoverlays
+	url = https://github.com/Seeed-Studio/seeed-linux-dtoverlays.git
+[submodule "deps/wyoming-satellite"]
+	path = deps/wyoming-satellite
+	url = https://github.com/rhasspy/wyoming-satellite.git

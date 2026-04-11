@@ -1,18 +1,26 @@
 installation:
-  version: 6.0.0-alpha.23
-  installDate: 2026-03-08T19:53:52.586Z
-  lastUpdated: 2026-03-08T19:53:52.586Z
+  version: 6.3.0
+  installDate: 2026-04-11T05:45:41.095Z
+  lastUpdated: 2026-04-11T05:45:41.095Z
 modules:
-  - core
-  - bmb
-  - bmm
-  - cis
-  - custom
+  - name: core
+    version: 6.3.0
+    installDate: 2026-04-11T05:45:41.051Z
+    lastUpdated: 2026-04-11T05:45:41.095Z
+    source: built-in
+    npmPackage: null
+    repoUrl: null
+  - name: bmm
+    version: 6.3.0
+    installDate: 2026-04-11T05:45:41.081Z
+    lastUpdated: 2026-04-11T05:45:41.095Z
+    source: built-in
+    npmPackage: null
+    repoUrl: null
 ides:
   - claude-code
+  - auggie
   - codex
+  - gemini
   - github-copilot
   - opencode
-  - auggie
-  - crush
-  - gemini

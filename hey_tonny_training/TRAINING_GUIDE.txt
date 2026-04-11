@@ -1,0 +1,54 @@
+===============================================
+    HEY TONNY - Custom Wake Word Training Guide
+===============================================
+
+STEP 1: Record Family Samples (Optional but Recommended)
+--------------------------------------------------------
+These real recordings improve accuracy and can be used for testing.
+
+Run:  ./record_samples.sh
+
+Goal: 10-20 samples per family member, varying:
+  - Distance from mic
+  - Tone of voice
+  - Background noise levels
+
+STEP 2: Train Using Google Colab (FREE)
+---------------------------------------
+Open this notebook in your browser:
+
+  https://colab.research.google.com/drive/1q1oe2zOyZp7UsB3jJiQ1IFn8z5YfjwEb
+
+In the notebook:
+  1. Set your wake word to: hey tonny
+  2. Run all cells (takes ~30-60 minutes)
+  3. Download the generated .tflite model file
+
+Alternative (more control):
+  https://colab.research.google.com/drive/1Hs0PoRCWvoN4FnYHAzOPZgBMoIzJgR8L
+
+STEP 3: Deploy Your Model
+-------------------------
+1. Copy the .tflite file to the Pi:
+   scp hey_tonny.tflite delorenj@<pi-ip>:/home/delorenj/hey_tonny_training/
+
+2. Create custom models directory:
+   mkdir -p /home/delorenj/custom_wakewords
+
+3. Copy model there:
+   cp /home/delorenj/hey_tonny_training/hey_tonny.tflite /home/delorenj/custom_wakewords/
+
+4. Update the openwakeword service (already configured - just restart):
+   sudo systemctl restart wyoming-openwakeword wyoming-satellite
+
+STEP 4: Test
+------------
+Say "Hey Tonny" and watch the logs:
+   journalctl -u wyoming-satellite -f
+
+===============================================
+Files in this directory:
+  - record_samples.sh  : Script to record family voice samples
+  - samples/           : Recorded .wav files organized by speaker
+  - *.tflite           : Your trained model (after Step 2)
+===============================================
