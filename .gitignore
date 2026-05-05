@@ -5,6 +5,3 @@ node_modules
 *.mp3
 *.zip
 *.aab
-*.wav
-.ralph/logs/
-_bmad-output/
