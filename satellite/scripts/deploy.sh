@@ -31,10 +31,14 @@ cd "${CRATE_DIR}"
 # Prefer `cross` because cpal's ALSA backend needs a target sysroot.
 # Fallback to plain cargo if `cross` is unavailable but a sysroot is configured.
 if command -v cross >/dev/null 2>&1; then
-  cross build --release --target "${TARGET}" --features real-wake
+  # NOTE: --features real-wake is intentionally OMITTED until heyma-satellite/src/wake.rs
+  # is rewritten against oww-rs 0.2.0's actual public API (create_unlock_task_sync owns
+  # its own mic loop, no Detector type exists). The current build ships StubWakeDetector
+  # which never fires on real audio. Tracked as D4 in deferred-work.md.
+  cross build --release --target "${TARGET}"
 else
   echo "    cross not found; trying plain cargo (requires aarch64 sysroot to be configured)" >&2
-  cargo build --release --target "${TARGET}" --features real-wake
+  cargo build --release --target "${TARGET}"
 fi
 
 BINARY="${CRATE_DIR}/target/${TARGET}/release/heyma"

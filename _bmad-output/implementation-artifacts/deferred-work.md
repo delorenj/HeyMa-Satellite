@@ -34,9 +34,20 @@ These findings are real but not blockers for v0.1. They were surfaced during the
 
 **Suggested v0.2 approach:** Either wrap `CpalAudioSink` in `Arc<Mutex<...>>` at construction and clone into `spawn_blocking`, or refactor `AudioSink` to `play_wav(self: Arc<Self>, wav: Bytes) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>`. Both unblock the supervisor during playback.
 
+## D4 — Real wake detection (`real-wake` feature) does not compile against oww-rs 0.2.0
+
+**What:** rust-pro's `OwwDetector` in `heyma-satellite/src/wake.rs` (gated behind the `real-wake` Cargo feature) imports `oww_rs::Detector` and calls `Detector::new(model_path, threshold)`. That API does not exist in `oww-rs 0.2.0`. The actual public surface of the crate exposes only `create_unlock_task_sync(running: CancellationToken, chunks_sender: broadcast::Sender<ChunkType>) -> Result<bool, String>`, which owns its own cpal-based mic loop. The `Model` trait, `Models::new`, and `model::new_model` are all `pub(crate)`, so we cannot drive the inference engine from our own audio pipeline.
+
+**Why deferred:** Discovered during the cross-compile dry-run. The host test suite missed it because tests don't enable the `real-wake` feature. Fixing this requires either (a) rewriting `wake.rs` to integrate with `create_unlock_task_sync`'s broadcast-channel model (and likely changing our `AudioSource` architecture to coexist with oww-rs's mic ownership), (b) vendoring + patching oww-rs to expose a low-level API, or (c) switching to a different wake-detector crate entirely (Rustpotter, livekit-wakeword, or rolling our own with `tract-onnx` against openwakeword's ONNX models directly).
+
+**Real-world impact today:** The shipped binary uses `StubWakeDetector` regardless of intent. Stub fires only on a hardcoded sentinel sample value not present in real audio, so the satellite will never wake on speech. The system is functional for testing transport / wire-contract / playback paths, but cannot detect "hey tonny" until D4 is resolved. `deploy.sh` no longer passes `--features real-wake` to keep the build from breaking; the flag stays defined in `Cargo.toml` for the eventual fix.
+
+**Suggested v0.2 approach:** Most direct path is option (c) — bypass `oww-rs` entirely. `tract-onnx` is the inference engine `oww-rs` itself uses; we can load openwakeword's published ONNX models (`embedding_model.onnx` + the wake-word-specific classifier) ourselves and run a 2-stage inference pipeline against PCM frames from our existing `AudioSource`. ~150-300 lines of Rust, no fork debt, full control over the threading model.
+
 ## Notes
 
 - D1 and D2 came from the edge-case hunter review.
 - D3 is a patch that turned out to need a spec amendment we didn't do; flagged honestly here rather than claiming false coverage.
+- D4 was discovered during the cross-compile dry-run after the spec was already approved. Pretty significant for shipping a working wake-on-voice device, since without it the binary literally can't hear "hey tonny." But it's deferrable because everything downstream of wake (transport, playback, reconnect, observability) is already correct and testable end-to-end via fakes.
 - None of these block the wire contract or the trait seam architecture.
-- Do not implement any of these without a fresh spec round; all three touch architectural surface that wasn't designed for them in v0.1.
+- Do not implement any of these without a fresh spec round; all four touch architectural surface that wasn't designed for them in v0.1.

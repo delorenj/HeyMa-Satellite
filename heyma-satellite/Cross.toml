@@ -1,0 +1,16 @@
+# Cross.toml — configures cross-rs for aarch64-unknown-linux-gnu cross-compilation.
+#
+# The cpal crate links against libasound2 (ALSA) at build time. The default
+# cross Docker image for aarch64 does not ship the ARM64 ALSA development
+# headers, so the cargo build fails with "Package alsa was not found".
+#
+# Adding the foreign architecture and installing libasound2-dev:arm64 inside
+# the cross container before cargo runs resolves the link path. The package
+# is fetched only on the first build (or after image cache invalidation).
+
+[target.aarch64-unknown-linux-gnu]
+pre-build = [
+    "dpkg --add-architecture arm64",
+    "apt-get update",
+    "apt-get install --assume-yes libasound2-dev:arm64",
+]
