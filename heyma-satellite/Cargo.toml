@@ -1,0 +1,66 @@
+[package]
+name = "heyma"
+version = "0.1.0"
+edition = "2021"
+description = "HeyMa Voice Satellite — wake-word capture and relay for the Pi Zero 2 W"
+license = "MIT"
+
+[[bin]]
+name = "heyma"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+
+# WebSocket transport
+tokio-tungstenite = { version = "0.27", features = ["connect"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+
+# Audio capture + playback
+cpal = { version = "0.16", features = [] }
+
+# Wake word detection via ONNX
+# oww-rs 0.2.0 is published on crates.io (2025-10-01), not yanked.
+# It wraps openwakeword ONNX models via tract-onnx.
+oww-rs = { version = "0.2", optional = true }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Config hydration from HEYMA_* env vars
+figment = { version = "0.10", features = ["env"] }
+
+# Structured logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# Unique session IDs
+uuid = { version = "1", features = ["v4"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# dyn-compatible async traits
+async-trait = "0.1"
+
+# Byte utilities
+bytes = "1"
+
+# WAV decoding/encoding for speaker playback
+hound = "3.5"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net"] }
+tokio-tungstenite = { version = "0.27", features = ["connect"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+async-trait = "0.1"
+assert_matches = "1"
+tempfile = "3"
+
+[features]
+default = []
+# Enable real wake-word detection via oww-rs + tract-onnx
+real-wake = ["oww-rs"]

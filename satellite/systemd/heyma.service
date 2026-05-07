@@ -1,0 +1,26 @@
+[Unit]
+Description=HeyMa Voice Satellite
+Documentation=https://github.com/delorenj/TonnyBox/blob/main/_bmad-output/implementation-artifacts/tech-spec-wip.md
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=delorenj
+Group=audio
+SupplementaryGroups=audio
+WorkingDirectory=/home/delorenj
+EnvironmentFile=/etc/heyma.env
+ExecStart=/usr/local/bin/heyma
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Allow long-tail recovery after misconfiguration: 10 attempts within 10 minutes
+# before the unit lands in `failed` state. Operator can `systemctl reset-failed`.
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+[Install]
+WantedBy=multi-user.target
