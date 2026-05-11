@@ -1,8 +1,14 @@
 [Unit]
 Description=HeyMa Voice Satellite
-Documentation=https://github.com/delorenj/TonnyBox/blob/main/_bmad-output/implementation-artifacts/tech-spec-wip.md
+Documentation=https://github.com/delorenj/HeyMa-Satellite/blob/main/_bmad-output/implementation-artifacts/tech-spec-wip.md
 After=network-online.target sound.target
 Wants=network-online.target
+
+# Allow long-tail recovery after misconfiguration: 10 attempts within 10 minutes
+# before the unit lands in `failed` state. Operator can `systemctl reset-failed`.
+# Note: StartLimit* belong in [Unit] on systemd >= 230.
+StartLimitIntervalSec=600
+StartLimitBurst=10
 
 [Service]
 Type=simple
@@ -16,11 +22,6 @@ Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
-
-# Allow long-tail recovery after misconfiguration: 10 attempts within 10 minutes
-# before the unit lands in `failed` state. Operator can `systemctl reset-failed`.
-StartLimitIntervalSec=600
-StartLimitBurst=10
 
 [Install]
 WantedBy=multi-user.target
