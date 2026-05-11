@@ -16,13 +16,13 @@ These findings are real but not blockers for v0.1. They were surfaced during the
 
 **Suggested v0.2 approach:** Gate `wake_tx.send` while `active_session.is_some()` AND `playing == true`. One boolean flag flipped in the wav_rx supervisor arm. ~5 lines of code, no DSP.
 
-## D2 — Silent-mic detection / heartbeat
+## ~~D2 — Silent-mic detection / heartbeat~~ (RESOLVED 2026-05-11)
 
-**What:** No watchdog detects the case where the mic is connected and the cpal stream is "running" but produces only zero samples (mute switch on, broken codec). The satellite sits idle indefinitely without firing wake events; from systemd's perspective it's healthy.
+**Resolution:** ReSpeaker codec failure on `tonny.local` made this less hypothetical than expected. Patched at `main.rs` supervisor mic-frame arm with a 10-second rolling window that accumulates sum-of-squares + peak per frame via a new allocation-free `AudioFrame::sumsq_and_peak()` method. Each window emits either `event=audio_level` at INFO (rms >= 50) or `event=audio_silent_warning` at WARN (rms < 50) with structured fields `rms`, `peak`, `samples`, `window_secs`, plus a `hint` string on the WARN.
 
-**Why deferred:** Operationally rare (user would notice "Tonny isn't responding"), and the fix is in the observability story, not the v0.1 wire-contract story.
+Verified live on `tonny.local` with the failed ReSpeaker: first window after restart produced `rms=8 peak=271` WARN within 10 s. Cross-checked against external `arecord` capture (rms ~15, peak 266 on the same hardware) — measurements align.
 
-**Suggested v0.2 approach:** Periodic RMS sample of incoming frames. If 60+ seconds of near-zero RMS pass with no wake event, log `audio_silent_for_minutes` at WARN. Optional: surface as a metric for an external watchdog.
+**Original problem:** No watchdog detected the case where the mic was connected and the cpal stream was "running" but produced only zero samples (mute switch on, broken codec). The satellite sat idle indefinitely without firing wake events; from systemd's perspective it looked healthy.
 
 ## D3 — `play_wav` still blocks supervisor (F5 partial fix)
 

@@ -12,9 +12,20 @@ use crate::wake::{make_detector, WakeDetector};
 use anyhow::Result;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info, warn};
 use uuid::Uuid;
+
+// D2 watchdog: emit a periodic audio-level summary so a dead mic surfaces in journalctl
+// instead of looking healthy while doing nothing useful.
+//
+// Window: ten seconds of accumulated sum-of-squares and peak, then reset.
+// Healthy speech captures show RMS in the hundreds-to-thousands range and peaks well above
+// 1000. The dead ReSpeaker codec observed on tonny.local on 2026-05-11 produced RMS ~15 and
+// peak 266 across a full ten seconds of speech: clearly distinguishable.
+const AUDIO_WINDOW: Duration = Duration::from_secs(10);
+const AUDIO_SILENCE_RMS: f64 = 50.0;
 
 // ---------------------------------------------------------------------------
 // Supervisor
@@ -73,6 +84,12 @@ pub async fn run_supervisor(
     // F3: per-channel dropped-frame counters.
     let wake_dropped = Arc::new(AtomicU64::new(0));
     let utt_dropped = Arc::new(AtomicU64::new(0));
+
+    // D2: rolling audio-level window state.
+    let mut audio_window_start = Instant::now();
+    let mut audio_window_sumsq: f64 = 0.0;
+    let mut audio_window_samples: u64 = 0;
+    let mut audio_window_peak: u32 = 0;
 
     loop {
         tokio::select! {
@@ -181,6 +198,42 @@ pub async fn run_supervisor(
                         break;
                     }
                 };
+
+                // D2: accumulate this frame into the rolling level window.
+                let (frame_sumsq, frame_peak) = frame.sumsq_and_peak();
+                audio_window_sumsq += frame_sumsq;
+                audio_window_samples += (frame.len() / 2) as u64;
+                if frame_peak > audio_window_peak {
+                    audio_window_peak = frame_peak;
+                }
+                if audio_window_start.elapsed() >= AUDIO_WINDOW
+                    && audio_window_samples > 0
+                {
+                    let rms = (audio_window_sumsq / audio_window_samples as f64).sqrt();
+                    if rms < AUDIO_SILENCE_RMS {
+                        warn!(
+                            event = "audio_silent_warning",
+                            rms = rms as u32,
+                            peak = audio_window_peak,
+                            samples = audio_window_samples,
+                            window_secs = AUDIO_WINDOW.as_secs(),
+                            hint = "mic may be muted, unplugged, or hardware-failed; \
+                                    expected RMS > 50 for ambient speech",
+                        );
+                    } else {
+                        info!(
+                            event = "audio_level",
+                            rms = rms as u32,
+                            peak = audio_window_peak,
+                            samples = audio_window_samples,
+                            window_secs = AUDIO_WINDOW.as_secs(),
+                        );
+                    }
+                    audio_window_start = Instant::now();
+                    audio_window_sumsq = 0.0;
+                    audio_window_samples = 0;
+                    audio_window_peak = 0;
+                }
 
                 // Always feed the wake detector.
                 // F3: log dropped frames (rate-limited to every 1000 drops).

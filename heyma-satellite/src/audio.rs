@@ -44,6 +44,25 @@ impl AudioFrame {
             .map(|b| i16::from_le_bytes([b[0], b[1]]))
             .collect()
     }
+
+    /// D2 watchdog support: sum-of-squares and peak |sample| in one pass, no allocation.
+    /// Caller accumulates `sumsq` across frames to compute window RMS:
+    ///   rms = sqrt(total_sumsq / total_sample_count)
+    /// `peak` is u32 so i16::MIN (which overflows abs()) is representable as 32768.
+    pub fn sumsq_and_peak(&self) -> (f64, u32) {
+        let mut sumsq = 0.0f64;
+        let mut peak: u32 = 0;
+        for chunk in self.0.chunks_exact(2) {
+            let s = i16::from_le_bytes([chunk[0], chunk[1]]);
+            let sf = s as f64;
+            sumsq += sf * sf;
+            let abs_s = (s as i32).unsigned_abs();
+            if abs_s > peak {
+                peak = abs_s;
+            }
+        }
+        (sumsq, peak)
+    }
 }
 
 // ---------------------------------------------------------------------------
