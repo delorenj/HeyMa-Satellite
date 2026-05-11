@@ -20,10 +20,11 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 # Audio capture + playback
 cpal = { version = "0.16", features = [] }
 
-# Wake word detection via ONNX
-# oww-rs 0.2.0 is published on crates.io (2025-10-01), not yanked.
-# It wraps openwakeword ONNX models via tract-onnx.
-oww-rs = { version = "0.2", optional = true }
+# Wake word detection: 3-stage ONNX pipeline via tract-onnx directly.
+# oww-rs is no longer a dep; we run melspectrogram + embedding + classifier
+# inline, mirroring the oww-rs 0.2.0 pipeline without the oww-rs crate.
+tract-onnx = { version = "0.22", optional = true }
+ndarray = { version = "0.16", optional = true }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -62,5 +63,5 @@ tempfile = "3"
 
 [features]
 default = []
-# Enable real wake-word detection via oww-rs + tract-onnx
-real-wake = ["oww-rs"]
+# Enable real wake-word detection via direct tract-onnx ONNX pipeline.
+real-wake = ["dep:tract-onnx", "dep:ndarray"]
