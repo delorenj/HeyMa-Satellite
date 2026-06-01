@@ -3,7 +3,7 @@
 # Version: 6.3.0
 # Date: 2026-04-11T05:45:41.084Z
 
-project_name: TonnyBox
+project_name: HeyMa Satellite
 user_skill_level: intermediate
 planning_artifacts: "{project-root}/_bmad-output/planning-artifacts"
 implementation_artifacts: "{project-root}/_bmad-output/implementation-artifacts"

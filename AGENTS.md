@@ -1,4 +1,4 @@
-# TonnyBox — Agent Guide
+# HeyMa Satellite — Agent Guide
 
 **Generated:** 2026-05-04 | **Commit:** ececc75 | **Branch:** main
 
