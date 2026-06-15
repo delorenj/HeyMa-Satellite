@@ -10,3 +10,6 @@
 [submodule "deps/wyoming-satellite"]
 	path = deps/wyoming-satellite
 	url = https://github.com/rhasspy/wyoming-satellite.git
+[submodule "agents/hermes/pm/runtime"]
+	path = agents/hermes/pm/runtime
+	url = git@github.com:delorenj/agent-hm-tonnybox-pm.git
