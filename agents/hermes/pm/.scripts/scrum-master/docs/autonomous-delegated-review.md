@@ -105,6 +105,8 @@ not satisfied.
 An adversarially-**accepted** `in_review` ticket equals `completed` for
 dependents and flow. By default the ticket STAYS in the review lane — it is the
 operator's deferred-QA queue — and is NOT auto-transitioned to `completed`.
+If the board/provider names that resting state `Awaiting Approval`, treat that
+label as the same done/completed condition rather than a wait-for-human stall.
 `--close` is an OPTIONAL flag (operator QA sweep) and is omitted by the normal
 loop:
 

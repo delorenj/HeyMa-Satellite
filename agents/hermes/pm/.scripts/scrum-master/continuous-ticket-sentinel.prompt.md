@@ -60,10 +60,12 @@ on Linear, Plane, or Trello.
      independence satisfied, close gate passes): autonomously TREAT THE TICKET AS
      DONE. Leave it in the review lane as the operator's deferred-QA queue (do NOT
      auto-transition to `completed`; `--close` is an optional operator-QA-sweep
-     flag the loop omits). Record the adversarial review report, emit the decision
-     event, and post ONE ticket comment stating the autonomous acceptance with a
-     pointer to the report — never a "waiting on you" comment, no grace wait. A
-     dependent blocked only on this review-accepted feature is now unblocked.
+     flag the loop omits). If the provider calls that resting state `Awaiting
+     Approval`, treat it the same way: done/completed for flow, not a waiting
+     state. Record the adversarial review report, emit the decision event, and
+     post ONE ticket comment stating the autonomous acceptance with a pointer to
+     the report — never a "waiting on you" comment, no grace wait. A dependent
+     blocked only on this review-accepted feature is now unblocked.
    - **Held** (a real finding or gate failure): the ticket goes back to active
      (`started` if a worker takes it now, else `unstarted`); record the hold
      reasons and emit the decision event.
@@ -81,9 +83,9 @@ on Linear, Plane, or Trello.
 8. **Anti-stall.** Never end a pass with work parked waiting on the operator's
    approval or sign-off. "Looks good, waiting on the operator" is never a terminal
    pass state. The only legitimate review-lane outcomes are: **accepted** (treat
-   as done, move on), **held** (back to active), or a genuine **out-of-scope
-   blocker** (recorded and waited on). There is no fourth "waiting for the
-   operator's sign-off" state.
+   as done, move on — including provider labels like `Awaiting Approval`),
+   **held** (back to active), or a genuine **out-of-scope blocker** (recorded and
+   waited on). There is no fourth "waiting for the operator's sign-off" state.
 9. Update `runtime/continuous-ticket-sentinel-state.json`: `active` /
    `blocked` / `idle` / `stalled` with the required fields (`source`, `agent_id`,
    `repo`, `ticket_provider`, `status`, `summary`, `reason`, `updated_at`,
