@@ -68,13 +68,12 @@ on Linear, Plane, or Trello.
      blocked only on this review-accepted feature is now unblocked.
    - **Held** (a real finding or gate failure): the ticket goes back to active
      (`started` if a worker takes it now, else `unstarted`); record the hold
-     reasons and emit the decision event.
+     reasons in the review report and a ticket comment.
 6. **Regression rollback.** If a later dependent proves a review-accepted feature
    is ACTUALLY BROKEN, move that feature back to active (`started` if a worker
    takes it now, else `unstarted`) as a PREREQUISITE of the dependent; comment
-   naming the dependent + symptom; emit
-   `bloodbank.v1.repo.tonnybox.issue.review_rollback.recorded`
-   `{issue, surfaced_by, reason}`. The dependent stays blocked on the prerequisite
+   naming the dependent + symptom, and record the rollback (issue, surfaced_by,
+   reason) in the issue evidence file. The dependent stays blocked on the prerequisite
    until it is fixed. This is expected and healthy — it is the trade for deferring
    operator QA, not a failure.
 7. **External blockers only** (credentials, third-party access, paid actions,
