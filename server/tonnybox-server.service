@@ -1,0 +1,35 @@
+[Unit]
+Description=TonnyBox Server API
+After=network-online.target hermes-tonnybox-pm-consumer.service
+Wants=network-online.target hermes-tonnybox-pm-consumer.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/delorenj/code/TonnyBox
+Environment=PYTHONUNBUFFERED=1
+Environment=TONNYBOX_SERVER_HOST=0.0.0.0
+Environment=TONNYBOX_SERVER_PORT=8778
+Environment=TONNYBOX_S3_ALIAS=delo
+Environment=TONNYBOX_S3_BUCKET=tonnybox
+Environment=TONNYBOX_WORK_DIR=/home/delorenj/code/TonnyBox/agents/hermes/pm/runtime/voice-work
+Environment=TONNYBOX_TRANSCRIPT_DIR=/home/delorenj/d/Notes/TonnyTranscripts
+Environment="TONNYBOX_TRANSCRIBE_COMMAND=env TRANSCRIPTS={transcript_dir} /home/delorenj/code/HeyMa/bin/transcribe {audio_path} --device cpu --output {transcript_path}"
+Environment=TONNYBOX_HERMES_MODEL=gpt-codex-5.4
+Environment=TONNYBOX_REQUIRE_WAKEWORD=false
+Environment=TONNYBOX_TONNY_REPLY_TIMEOUT_S=75
+Environment="TONNYBOX_TONNY_ERROR_REPLY=Transcript saved. Tonny timed out before answering."
+Environment=TONNYBOX_ROUTER_WEBHOOK_URL=http://127.0.0.1:5678/webhook/tonny-operator-router
+Environment=TONNYBOX_ROUTER_TIMEOUT_S=10
+Environment="TONNYBOX_ROUTER_ERROR_REPLY=I heard you, but the Tonny operator router is not responding."
+Environment="TONNYBOX_FAST_ACK_TEXT=Got it."
+Environment=HERMES_HOME=/home/delorenj/code/TonnyBox/agents/hermes/pm/runtime
+Environment=HERMES_OAUTH_FILE=/home/delorenj/.hermes/auth.json
+EnvironmentFile=-/home/delorenj/code/TonnyBox/agents/hermes/pm/runtime/.env
+ExecStart=/home/delorenj/.hermes/hermes-agent/.venv/bin/python -m server.tonnybox_server
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/home/delorenj/code/TonnyBox/agents/hermes/pm/runtime/logs/tonnybox-server.log
+StandardError=append:/home/delorenj/code/TonnyBox/agents/hermes/pm/runtime/logs/tonnybox-server.log
+
+[Install]
+WantedBy=default.target
