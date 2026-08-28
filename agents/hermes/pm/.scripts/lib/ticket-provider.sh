@@ -3,8 +3,8 @@
 # sentinel engine and a concrete ticket system (Linear | Plane | Trello).
 #
 # The engine NEVER calls a provider directly. It calls `tp <op> [args...]`,
-# which dispatches to providers/<provider>.sh. Swapping providers is a one-line
-# config change in role.yaml (ticket_provider.name) — no engine edits.
+# which dispatches to providers/<provider>.sh. Repo-root .project.json owns the
+# provider/board binding; role.yaml is only a legacy provider-name fallback.
 #
 # Contract (operations every provider must implement):
 #   resolve                       -> JSON {provider, board_id, board_url}
@@ -12,21 +12,50 @@
 #   list_issues                   -> JSON [ {id,key,title,state,state_type,
 #                                            updated_at,assignee,url}, ... ]
 #   get_issue <id>                -> JSON {id,key,title,description,acceptance,
-#                                          state,state_type,comments:[...]}
+#                                          state,state_type,comments:[...],
+#                                          attachments:[...]}
 #   comment <id> <body>           -> prints comment id
 #   transition <id> <normalized>  -> moves issue; normalized in
-#                                     backlog|unstarted|started|in_review|completed
+#                                     backlog|unstarted|started|in_review|completed|
+#                                     cancelled
 #   create_board <name> <id> <d>  -> JSON {board_id, board_url}
+#   create_issue [--if-absent] <title> [desc]
+#                                 -> JSON {issue_id, key, issue_url, created}
+#                                    Files a new ticket on the bound board.
+#                                    NOT idempotent by default (two issues may
+#                                    share a title); --if-absent reuses an exact
+#                                    title match and reports created:false.
 #
 # Each provider reads its credentials from the environment (see providers/*.sh
-# headers) and the board binding from role.yaml under `ticket_provider:`.
+# headers) and the board binding from repo-root .project.json.
 
-# Resolve the provider name: explicit env wins, then role.yaml (self-parsed so
-# this works even when _lib.sh / yaml_get is not loaded), then default.
+# Resolve the provider name: explicit env wins, then repo-root .project.json
+# (the SOT), then role.yaml (self-parsed so this works even when _lib.sh /
+# yaml_get is not loaded), then default.
 tp_provider_name() {
   if [ -n "${TICKET_PROVIDER:-}" ]; then
     printf '%s\n' "$TICKET_PROVIDER"
     return 0
+  fi
+  # .project.json ticket_provider.type — walk up from the role dir to repo root.
+  local role_dir
+  role_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd)"
+  if [ -n "$role_dir" ]; then
+    local sot_type
+    sot_type="$(python3 - "$role_dir" <<'PY' 2>/dev/null
+import sys, json, pathlib
+start = pathlib.Path(sys.argv[1]).resolve()
+for parent in [start, *start.parents]:
+    f = parent / ".project.json"
+    if f.is_file():
+        try:
+            print((json.loads(f.read_text()).get("ticket_provider") or {}).get("type", ""))
+        except Exception:
+            print("")
+        break
+PY
+)"
+    [ -n "$sot_type" ] && { printf '%s\n' "$sot_type"; return 0; }
   fi
   local role_yaml
   role_yaml="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd)/role.yaml"
@@ -71,7 +100,7 @@ tp() {
 }
 
 # Normalized states the engine reasons in. Adapters map these to provider terms.
-TP_STATES="backlog unstarted started in_review completed"
+TP_STATES="backlog unstarted started in_review completed cancelled"
 
 tp_is_valid_state() {
   case " $TP_STATES " in
