@@ -1,0 +1,36 @@
+[project]
+name = "tonny-voice"
+version = "0.1.0"
+description = "Pipecat and Cartesia Line gateway for the Tonny audio satellite"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "pipecat-ai[deepgram,cartesia,websocket]==1.7.0",
+  "cartesia-line==0.2.17",
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.32,<1",
+  "pydantic-settings>=2.6,<3",
+]
+
+[project.scripts]
+tonny-voice = "tonny_voice.app:main"
+
+[dependency-groups]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "httpx>=0.28", "ruff>=0.8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tonny_voice"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]

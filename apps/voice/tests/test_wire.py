@@ -1,0 +1,150 @@
+import asyncio
+from uuid import uuid4
+
+import pytest
+from fastapi.testclient import TestClient
+
+from tonny_voice.app import create_app
+from tonny_voice.pipeline import Reply, VoiceEngine
+
+
+def hello(**updates):
+    return {
+        "type": "hello",
+        "session_id": str(uuid4()),
+        "sample_rate": 16000,
+        "encoding": "pcm_s16le",
+        "channels": 1,
+        "client": "tonny",
+        "version": "0.1.0",
+        **updates,
+    }
+
+
+@pytest.mark.parametrize(
+    "first,code",
+    [
+        ("{bad", "protocol_error"),
+        ("[]", "protocol_error"),
+        ({"type": "end_of_input"}, "invalid_state"),
+        (hello(sample_rate=48000), "protocol_error"),
+        (hello(channels=True), "protocol_error"),
+        (hello(encoding="float32"), "protocol_error"),
+        (hello(session_id="not-uuid"), "protocol_error"),
+        (hello(version="9.0.0"), "protocol_error"),
+        (b"\x00\x00", "invalid_state"),
+    ],
+)
+def test_reject_invalid_handshakes(settings, first, code):
+    with TestClient(create_app(settings)) as client, client.websocket_connect("/v1/voice") as ws:
+        if isinstance(first, bytes):
+            ws.send_bytes(first)
+        elif isinstance(first, str):
+            ws.send_text(first)
+        else:
+            ws.send_json(first)
+        assert ws.receive_json()["code"] == code
+
+
+@pytest.mark.parametrize(
+    "chunks,ending,code",
+    [
+        ([b"x"], None, "invalid_audio"),
+        ([b""], None, "invalid_audio"),
+        ([b"\0" * 65538], None, "frame_too_large"),
+        ([b"\0" * 32000, b"\0\0"], None, "input_too_large"),
+        ([], {"type": "end_of_input"}, "no_speech"),
+        ([b"\0\0"], {"type": "surprise"}, "invalid_state"),
+    ],
+)
+def test_reject_malformed_audio_and_out_of_order_messages(settings, chunks, ending, code):
+    cfg = settings.model_copy(update={"max_input_seconds": 1})
+    with TestClient(create_app(cfg)) as client, client.websocket_connect("/v1/voice") as ws:
+        greeting = hello()
+        ws.send_json(greeting)
+        assert ws.receive_json() == {"type": "ready", "session_id": greeting["session_id"]}
+        for chunk in chunks:
+            ws.send_bytes(chunk)
+        if ending:
+            ws.send_json(ending)
+        assert ws.receive_json()["code"] == code
+
+
+def test_one_active_session_and_reset_conflict(settings):
+    with TestClient(create_app(settings)) as client, client.websocket_connect("/v1/voice") as first:
+        first.send_json(hello())
+        assert first.receive_json()["type"] == "ready"
+        assert client.post("/v1/reset").status_code == 409
+        with client.websocket_connect("/v1/voice") as second:
+            assert second.receive_json()["code"] == "busy"
+
+
+class Engine(VoiceEngine):
+    def __init__(self, settings, stall=False):
+        super().__init__(settings)
+        self.stall = stall
+        self.cancelled = False
+        self.received = []
+
+    async def process(self, pcm):
+        self.received.append(pcm)
+        if self.stall:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.cancelled = True
+        return Reply("Hello", "Hi", b"RIFF-test-WAV")
+
+
+def test_complete_wire_turn_and_health_admit_actual_evidence(settings):
+    engine = Engine(settings)
+    app = create_app(settings, engine=engine)
+    with TestClient(app) as client:
+        health = client.get("/healthz").json()
+        assert health["configured"] == dict.fromkeys(["deepgram", "openrouter", "cartesia"], True)
+        assert health["evidence_since_start"]["responses_sent"] == 0
+        assert health["evidence_since_start"]["tts_turns"] == 0
+        with client.websocket_connect("/v1/voice") as ws:
+            ws.send_json(hello())
+            ws.receive_json()
+            ws.send_bytes(b"\x01\x00")
+            ws.send_bytes(b"\x02\x00")
+            ws.send_json({"type": "end_of_input"})
+            assert ws.receive_json() == {"type": "response_start", "format": "wav", "final": True}
+            assert ws.receive_bytes() == b"RIFF-test-WAV"
+            assert ws.receive_json() == {"type": "response_end"}
+        assert engine.received == [b"\x01\x00\x02\x00"]
+        assert list(engine.history) == [("Hello", "Hi")]
+        assert client.get("/healthz").json()["evidence_since_start"]["responses_sent"] == 1
+        assert client.post("/v1/reset").json()["conversation_turns"] == 0
+
+
+@pytest.mark.parametrize("action", ["disconnect", "extra_input", "timeout"])
+def test_disconnect_and_timeout_cancel_pending_provider_work(settings, action):
+    cfg = settings.model_copy(update={"response_timeout_seconds": 0.15})
+    engine = Engine(cfg, stall=True)
+    app = create_app(cfg, engine=engine)
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/voice") as ws:
+            ws.send_json(hello())
+            ws.receive_json()
+            ws.send_bytes(b"\1\0" * 100)
+            ws.send_json({"type": "end_of_input"})
+            if action == "disconnect":
+                ws.close()
+            elif action == "extra_input":
+                ws.send_bytes(b"\1\0")
+                assert ws.receive_json()["code"] == "invalid_state"
+            else:
+                assert ws.receive_json()["code"] == "timeout"
+        assert engine.cancelled
+        assert not app.state.active
+        assert list(engine.history) == []
+
+
+def test_idle_input_deadline_releases_single_session_slot(settings):
+    cfg = settings.model_copy(update={"input_timeout_seconds": 0.02})
+    with TestClient(create_app(cfg)) as client, client.websocket_connect("/v1/voice") as ws:
+        ws.send_json(hello())
+        ws.receive_json()
+        assert ws.receive_json()["code"] == "timeout"

@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+tonny_release="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$tonny_release"
+set -a
+source deploy/tonny/voice.conf
+set +a
+export TONNY_REVISION
+TONNY_REVISION="$(cat REVISION)"
+export TONNY_COMMIT="$TONNY_REVISION"
+exec op run --env-file deploy/tonny/voice.env.op -- \
+  uv run --locked --no-sync --project apps/voice tonny-voice --host 0.0.0.0 --port 18778

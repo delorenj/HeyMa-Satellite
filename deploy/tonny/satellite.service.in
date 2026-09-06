@@ -1,0 +1,20 @@
+[Unit]
+Description=Tonny microphone and speaker satellite (SIGUSR1 to talk)
+After=network-online.target sound.target
+Wants=network-online.target
+Conflicts=heyma.service
+
+[Service]
+Type=simple
+User=delorenj
+Group=audio
+SupplementaryGroups=audio
+WorkingDirectory=@RELEASE@
+Environment=PYTHONUNBUFFERED=1
+ExecStart=@RELEASE@/venv/bin/python @RELEASE@/apps/satellite/satellite.py --url ws://big-chungus.local:18778/v1/voice --capture-seconds 6
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
