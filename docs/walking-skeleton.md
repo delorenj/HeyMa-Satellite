@@ -100,5 +100,36 @@ control tools are subsequent work.
 
 ## Acceptance evidence
 
-Live verification is in progress. A provider round trip alone does not establish
-microphone intelligibility or audible physical playback.
+Verified on 2026-09-06 against deployed implementation commit
+`1c99f6a102f420b16879af650734880a0c0d1e59`:
+
+- 29 gateway tests and 20 satellite tests passed through `mise run tonny:check`.
+  The satellite tests use their own Python 3.13 / websockets 15 environment;
+  the server has a different SDK dependency set.
+- Both services are active and enabled. The gateway reports that commit, and
+  the deployed Pi script checksum matches its committed source. The Pi daemon
+  used 27,020 KiB RSS while waiting for a turn.
+- A real provider test recognized **“Please say the walking skeleton is alive.”**,
+  replied **“The walking skeleton is alive.”**, and remembered the phrase when
+  asked about it in a second turn.
+- The Pi itself submitted a 2.601-second known WAV through `/v1/voice`, received
+  122,646 bytes of 24 kHz speech after 8.408 seconds, and completed actual ALSA
+  playback after 11.240 seconds. Independently transcribing the returned WAV
+  confirmed **“The walking skeleton is alive.”** Session:
+  `44c3309f-ddbe-484b-8bc2-97c572f770f6`.
+- `mise run tonny:talk` exercised the installed daemon's microphone path:
+  192,000 bytes captured over six seconds, normalized RMS 0.06672, successful
+  gateway connection, then `no_speech` from the unattended capture. The daemon
+  returned to `ready` after that error.
+
+The successful known-WAV test bypassed the microphone. A separate acoustic
+speaker-to-microphone recording did not yield intelligible speech. Actual
+spoken-input recognition and human confirmation of speaker audibility remain
+unverified; nonzero microphone samples and a successful `aplay` exit do not
+prove either. The next acceptance step is to run `mise run tonny:talk` while
+standing near Tonny, speak during its six-second capture, and listen for the reply.
+
+During integration, Deepgram's first `Finalize` result covered only 0.4 seconds
+of an already uploaded 2.6-second utterance. The gateway now sends buffered audio
+in order, requests `CloseStream`, and waits for terminal metadata acknowledging
+the full duration. A focused regression test covers that ordering.
