@@ -295,7 +295,8 @@ trap resume EXIT INT TERM
 sudo -n systemctl stop tonny-satellite.service
 sleep 1
 "$release/venv/bin/python" "$release/apps/satellite/satellite.py" \\
-    --url ws://big-chungus.local:18778/v1/voice --capture-seconds 6 --once
+    --url ws://big-chungus.local:18778/v1/voice --capture-seconds 6 \\
+    --connect-timeout 15 --response-timeout 60 --once
 sudo -n systemctl start tonny-satellite.service
 ready_invocation=''
 for attempt in $(seq 1 15); do
@@ -320,7 +321,7 @@ main_pid=$(sudo -n systemctl show --value -p MainPID tonny-satellite.service)
 pgrep -P "$main_pid" -x arecord >/dev/null
 trap - EXIT INT TERM
 """,
-            timeout=180,
+            timeout=240,
         ),
         end="",
     )

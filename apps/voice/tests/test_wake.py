@@ -58,8 +58,13 @@ def test_thirty_seconds_of_digital_silence_never_crosses_threshold() -> None:
 
 
 def test_invalid_or_missing_custom_model_fails_gateway_startup(tmp_path: Path) -> None:
-    with pytest.raises(WakeDetectorError, match="wake_model_checksum_mismatch"):
-        WakeDetector(Settings(wake_model_sha256="0" * 64))
+    for field in (
+        "wake_model_sha256",
+        "wake_melspec_model_sha256",
+        "wake_embedding_model_sha256",
+    ):
+        with pytest.raises(WakeDetectorError, match="wake_model_checksum_mismatch"):
+            WakeDetector(Settings(**{field: "0" * 64}))
     with pytest.raises(WakeDetectorError, match="wake_model_missing"):
         WakeDetector(Settings(wake_model_path=tmp_path / "missing.onnx"))
 

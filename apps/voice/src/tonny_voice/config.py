@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     wake_melspec_model_path: Path = ASSET_DIR / "melspectrogram.onnx"
     wake_embedding_model_path: Path = ASSET_DIR / "embedding_model.onnx"
     wake_model_sha256: str = "558bd199797084e41f6e1e9fd3cd330fb9920af5d55e06d2c647659bab33a5a0"
+    wake_melspec_model_sha256: str = (
+        "ba2b0e0f8b7b875369a2c89cb13360ff53bac436f2895cced9f479fa65eb176f"
+    )
+    wake_embedding_model_sha256: str = (
+        "70d164290c1d095d1d4ee149bc5e00543250a7316b59f31d056cff7bd3075c1f"
+    )
     wake_threshold: float = Field(default=0.5, ge=0, le=1)
     wake_trigger_frames: int = Field(default=3, ge=1, le=5)
     wake_preroll_seconds: float = Field(default=1.0, gt=0, le=3)

@@ -50,18 +50,13 @@ class WakeDetector:
                 raise WakeDetectorError("wake_dependency_unavailable") from exc
             model_factory = Model
         try:
-            random_state = np.random.get_state()
-            np.random.seed(0)
-            try:
-                self._model = model_factory(
-                    wakeword_models=[str(settings.wake_model_path)],
-                    inference_framework="onnx",
-                    melspec_model_path=str(settings.wake_melspec_model_path),
-                    embedding_model_path=str(settings.wake_embedding_model_path),
-                    ncpu=1,
-                )
-            finally:
-                np.random.set_state(random_state)
+            self._model = model_factory(
+                wakeword_models=[str(settings.wake_model_path)],
+                inference_framework="onnx",
+                melspec_model_path=str(settings.wake_melspec_model_path),
+                embedding_model_path=str(settings.wake_embedding_model_path),
+                ncpu=1,
+            )
         except Exception as exc:
             raise WakeDetectorError("wake_model_invalid") from exc
 
@@ -94,17 +89,25 @@ class WakeDetector:
             raise WakeDetectorError("wake_model_invalid") from exc
 
     def _validate_assets(self) -> None:
-        paths = (
-            self.settings.wake_model_path,
-            self.settings.wake_melspec_model_path,
-            self.settings.wake_embedding_model_path,
+        assets = (
+            (self.settings.wake_model_path, self.settings.wake_model_sha256),
+            (
+                self.settings.wake_melspec_model_path,
+                self.settings.wake_melspec_model_sha256,
+            ),
+            (
+                self.settings.wake_embedding_model_path,
+                self.settings.wake_embedding_model_sha256,
+            ),
         )
-        if any(not path.is_file() for path in paths):
+        if any(not path.is_file() for path, _ in assets):
             raise WakeDetectorError("wake_model_missing")
-        if any(path.stat().st_size <= 0 for path in paths):
+        if any(path.stat().st_size <= 0 for path, _ in assets):
             raise WakeDetectorError("wake_model_empty")
-        digest = hashlib.sha256(self.settings.wake_model_path.read_bytes()).hexdigest()
-        if digest != self.settings.wake_model_sha256:
+        if any(
+            hashlib.sha256(path.read_bytes()).hexdigest() != expected
+            for path, expected in assets
+        ):
             raise WakeDetectorError("wake_model_checksum_mismatch")
 
     def score(self, pcm: bytes) -> float:
@@ -122,11 +125,6 @@ class WakeDetector:
 
     def reset(self) -> None:
         try:
-            random_state = np.random.get_state()
-            np.random.seed(0)
-            try:
-                self._model.reset()
-            finally:
-                np.random.set_state(random_state)
+            self._model.reset()
         except Exception as exc:
             raise WakeDetectorError("wake_reset_failed") from exc

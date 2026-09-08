@@ -3,6 +3,7 @@ import time
 from uuid import uuid4
 
 import pytest
+from fastapi import WebSocketDisconnect
 from fastapi.testclient import TestClient
 
 from tonny_voice.app import create_app, read_continuous
@@ -236,6 +237,8 @@ class DirectWebSocket:
         message = next(self.messages)
         if self.delay and self.sent:
             await asyncio.sleep(self.delay)
+        if isinstance(message, dict):
+            return message
         return {"type": "websocket.receive", "bytes": message}
 
     async def send_json(self, message):
@@ -272,6 +275,27 @@ async def test_post_wake_capture_has_an_independent_deadline(settings):
     detection, audio = await read_continuous(ws, cfg, detector)
     assert detection.score == 0.9
     assert audio == detection_frame + post_frame
+
+
+@pytest.mark.asyncio
+async def test_wake_observation_precedes_failed_post_capture(settings):
+    cfg = settings.model_copy(
+        update={
+            "wake_preroll_seconds": 0.08,
+            "wake_post_seconds": 0.08,
+            "wake_trigger_frames": 1,
+            "max_input_seconds": 1,
+        }
+    )
+    detector = FakeWake([0.9])
+    observed = []
+    ws = DirectWebSocket(
+        [b"\1\0" * 1_280, {"type": "websocket.disconnect", "code": 1000}]
+    )
+    with pytest.raises(WebSocketDisconnect):
+        await read_continuous(ws, cfg, detector, observed.append)
+    assert len(observed) == 1
+    assert observed[0].score == 0.9
 
 
 def test_continuous_mode_drains_pcm_while_provider_runs(settings):

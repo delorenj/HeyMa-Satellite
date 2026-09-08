@@ -8,6 +8,7 @@ import contextlib
 import json
 import logging
 from collections import deque
+from collections.abc import Callable
 from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -137,7 +138,10 @@ async def receive_continuous_pcm(ws: WebSocket, cfg: Settings) -> bytes:
 
 
 async def read_continuous(
-    ws: WebSocket, cfg: Settings, detector: WakeScorer
+    ws: WebSocket,
+    cfg: Settings,
+    detector: WakeScorer,
+    on_detected: Callable[[WakeDetection], None] | None = None,
 ) -> tuple[WakeDetection, bytes]:
     """Detect upstream, retain bounded pre-roll, then collect a fixed request window."""
     detector.reset()
@@ -174,6 +178,8 @@ async def read_continuous(
     await ws.send_json(
         {"type": "wake_detected", "model": detection.model, "score": detection.score}
     )
+    if on_detected is not None:
+        on_detected(detection)
     audio = bytearray(b"".join(preroll))
     post_bytes = min(len(initial_post), cfg.wake_post_bytes)
     audio.extend(initial_post[:post_bytes])
@@ -362,14 +368,17 @@ def create_app(
             if hello.mode == "continuous":
                 if wake is None:
                     raise VoiceError("wake_unavailable", "Wake detection is not available.")
-                detection, pcm = await read_continuous(ws, cfg, wake)
-                app.state.counters["wake_detected"] += 1
-                log.info(
-                    "session=%s wake_detected model=%s score=%.6f",
-                    session,
-                    detection.model,
-                    detection.score,
-                )
+
+                def record_wake(detection: WakeDetection) -> None:
+                    app.state.counters["wake_detected"] += 1
+                    log.info(
+                        "session=%s wake_detected model=%s score=%.6f",
+                        session,
+                        detection.model,
+                        detection.score,
+                    )
+
+                _, pcm = await read_continuous(ws, cfg, wake, record_wake)
                 await respond(ws, voice, pcm, continuous=True)
             else:
                 pcm = await read_input(ws, cfg)
