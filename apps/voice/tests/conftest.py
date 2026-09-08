@@ -10,4 +10,5 @@ def settings():
         deepgram_api_key=SecretStr("test-only"),
         cartesia_api_key=SecretStr("test-only"),
         llm_api_key=SecretStr("test-only"),
+        wake_enabled=False,
     )

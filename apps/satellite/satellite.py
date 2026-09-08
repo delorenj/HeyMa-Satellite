@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Push-to-talk ALSA client for the HeyMa v0.1 voice WebSocket protocol."""
+"""ALSA client for compatible push-to-talk and upstream-wake voice sessions."""
 
 from __future__ import annotations
 
@@ -46,6 +46,7 @@ class Options:
     input_wav: Path | None = None
     output_wav: Path | None = None
     no_playback: bool = False
+    hands_free: bool = False
 
 
 @dataclass(frozen=True)
@@ -221,7 +222,9 @@ def control(message: str | bytes) -> dict:
     return value
 
 
-async def connect_ready(options: Options, session_id: str) -> ClientConnection:
+async def connect_ready(
+    options: Options, session_id: str, *, mode: str = "turn"
+) -> ClientConnection:
     """Only retry before PCM submission. Keep the capture in RAM for this window."""
     started = time.monotonic()
     deadline = started + options.connect_timeout
@@ -238,11 +241,14 @@ async def connect_ready(options: Options, session_id: str) -> ClientConnection:
                     max_size=MAX_WAV_BYTES, max_queue=1,
                     ping_interval=20, ping_timeout=20,
                 )
-                await websocket.send(json.dumps({
+                greeting = {
                     "type": "hello", "session_id": session_id,
                     "sample_rate": SAMPLE_RATE, "encoding": "pcm_s16le",
                     "channels": 1, "client": "tonny", "version": "0.1.0",
-                }))
+                }
+                if mode != "turn":
+                    greeting["mode"] = mode
+                await websocket.send(json.dumps(greeting))
                 ready = control(await websocket.recv())
                 if ready["type"] != "ready" or ready.get("session_id") != session_id:
                     raise ClientError("invalid_ready")
@@ -307,6 +313,126 @@ async def exchange(options: Options, pcm: bytes, session_id: str) -> bytes:
         await websocket.close()
 
 
+async def continuous_exchange(options: Options, session_id: str) -> bytes:
+    """Stream live PCM after readiness; never reconnect or replay once submission starts."""
+    websocket = await connect_ready(options, session_id, mode="continuous")
+    process = await asyncio.create_subprocess_exec(
+        "arecord",
+        "-q",
+        "-D",
+        options.capture_device,
+        "-t",
+        "raw",
+        "-f",
+        "S16_LE",
+        "-r",
+        str(SAMPLE_RATE),
+        "-c",
+        "1",
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    submitted = False
+
+    async def send_pcm() -> None:
+        nonlocal submitted
+        assert process.stdout is not None
+        try:
+            while True:
+                chunk = await process.stdout.readexactly(FRAME_BYTES)
+                validate_pcm(chunk)
+                submitted = True
+                await websocket.send(chunk)
+        except asyncio.IncompleteReadError as exc:
+            if exc.partial:
+                raise ClientError("invalid_pcm_samples") from exc
+            if process.returncode not in (None, 0):
+                raise ClientError("arecord_failed") from exc
+            raise ClientError("short_capture") from exc
+
+    sender = asyncio.create_task(send_pcm())
+    response = bytearray()
+    started = False
+    detected = False
+    response_deadline: float | None = None
+
+    async def receive_or_capture_failure():
+        if started:
+            return await websocket.recv()
+        incoming = asyncio.create_task(websocket.recv())
+        done, _ = await asyncio.wait((incoming, sender), return_when=asyncio.FIRST_COMPLETED)
+        if sender in done:
+            incoming.cancel()
+            await asyncio.gather(incoming, return_exceptions=True)
+            return sender.result()
+        return incoming.result()
+
+    try:
+        while True:
+            if response_deadline is not None:
+                async with asyncio.timeout_at(response_deadline):
+                    message = await receive_or_capture_failure()
+            else:
+                message = await receive_or_capture_failure()
+            if isinstance(message, bytes):
+                if not started:
+                    raise ClientError("audio_before_response_start")
+                if len(response) + len(message) > MAX_WAV_BYTES:
+                    raise ClientError("response_too_large")
+                response.extend(message)
+                continue
+            value = control(message)
+            if value["type"] == "wake_detected":
+                score = value.get("score")
+                if (
+                    detected
+                    or not isinstance(value.get("model"), str)
+                    or isinstance(score, bool)
+                    or not isinstance(score, (float, int))
+                    or not math.isfinite(score)
+                    or not 0 <= score <= 1
+                ):
+                    raise ClientError("invalid_wake_detected")
+                detected = True
+                response_deadline = time.monotonic() + options.response_timeout
+                log(
+                    "wake_detected",
+                    session_id=session_id,
+                    model=value["model"],
+                    score=round(float(score), 6),
+                )
+            elif value["type"] == "response_start":
+                if not detected or started or value.get("format") != "wav":
+                    raise ClientError("invalid_response_start")
+                started = True
+                sender.cancel()
+                await asyncio.gather(sender, return_exceptions=True)
+                await terminate_process(process)
+            elif value["type"] == "response_end":
+                if not started:
+                    raise ClientError("response_end_before_start")
+                wav = bytes(response)
+                validate_wav(wav)
+                try:
+                    await websocket.send(json.dumps({"type": "close"}))
+                except ConnectionClosed:
+                    pass
+                return wav
+            else:
+                raise ClientError("unexpected_control_message")
+    except (OSError, TimeoutError, ConnectionClosed) as exc:
+        # Do not reconnect here. A frame may already have reached the gateway.
+        if submitted:
+            raise ClientError("continuous_session_lost_after_submission") from exc
+        raise
+    finally:
+        sender.cancel()
+        await asyncio.gather(sender, return_exceptions=True)
+        await terminate_process(process)
+        await websocket.close()
+
+
 async def play_audio(options: Options, wav: bytes) -> None:
     info = validate_wav(wav)
     process = await asyncio.create_subprocess_exec(
@@ -353,6 +479,32 @@ async def run_turn(options: Options, session_id: str | None = None) -> None:
         elapsed_seconds=round(time.monotonic() - started, 3))
 
 
+async def run_hands_free_turn(options: Options, session_id: str | None = None) -> None:
+    if options.input_wav or options.no_playback:
+        raise ClientError("hands_free_requires_live_capture_and_playback")
+    started = time.monotonic()
+    session_id = session_id or str(uuid4())
+    log("continuous_capture_started", session_id=session_id, source="alsa")
+    wav = await continuous_exchange(options, session_id)
+    info = validate_wav(wav)
+    log(
+        "response_received",
+        session_id=session_id,
+        bytes=len(wav),
+        audio_seconds=round(info.seconds, 3),
+        sample_rate=info.sample_rate,
+        elapsed_seconds=round(time.monotonic() - started, 3),
+    )
+    if options.output_wav:
+        options.output_wav.write_bytes(wav)
+    await play_audio(options, wav)
+    log(
+        "playback_complete",
+        session_id=session_id,
+        elapsed_seconds=round(time.monotonic() - started, 3),
+    )
+
+
 class TriggerGate:
     """One pending trigger at most; signals during a turn are intentionally dropped."""
 
@@ -383,18 +535,25 @@ async def serve(options: Options) -> int:
 
     loop.add_signal_handler(signal.SIGTERM, stop)
     loop.add_signal_handler(signal.SIGINT, stop)
-    loop.add_signal_handler(signal.SIGUSR1, gate.trigger)
+    handled_signals = [signal.SIGTERM, signal.SIGINT]
+    if not options.hands_free:
+        loop.add_signal_handler(signal.SIGUSR1, gate.trigger)
+        handled_signals.append(signal.SIGUSR1)
     try:
-        log("ready", mode="once" if options.once else "push_to_talk", pid=os.getpid())
+        mode = "hands_free" if options.hands_free else ("once" if options.once else "push_to_talk")
+        log("ready", mode=mode, pid=os.getpid())
         while True:
-            if not options.once:
+            if not options.once and not options.hands_free:
                 await gate.pending.wait()
                 gate.pending.clear()
             gate.busy = True
             started = time.monotonic()
             session_id = str(uuid4())
             try:
-                await run_turn(options, session_id)
+                if options.hands_free:
+                    await run_hands_free_turn(options, session_id)
+                else:
+                    await run_turn(options, session_id)
             except Exception as exc:
                 # Exceptions from networking and ALSA can embed URLs or input.
                 log("error", session_id=session_id,
@@ -402,30 +561,36 @@ async def serve(options: Options) -> int:
                     code=str(exc) if isinstance(exc, ClientError) else type(exc).__name__)
                 if options.once:
                     return 1
+                if options.hands_free:
+                    await asyncio.sleep(1)
             finally:
                 gate.busy = False
             if options.once:
                 return 0
-            log("ready", mode="push_to_talk", pid=os.getpid())
+            log("ready", mode=mode, pid=os.getpid())
     except asyncio.CancelledError:
         log("shutdown")
         return 0
     finally:
-        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGUSR1):
+        for signum in handled_signals:
             loop.remove_signal_handler(signum)
 
 
 def parse_options(argv: list[str] | None = None) -> Options:
-    parser = argparse.ArgumentParser(description=(
-        "Tonny push-to-talk satellite: wait for SIGUSR1, capture one fixed-length "
-        "turn, send to the voice gateway, and play its WAV reply. No wake word or barge-in."
-    ))
+    parser = argparse.ArgumentParser(
+        description="Tonny ALSA satellite with upstream hands-free wake or SIGUSR1 turn mode."
+    )
     parser.add_argument("--url", default=os.environ.get("TONNY_GATEWAY_URL", DEFAULT_URL))
     parser.add_argument("--capture-device", default="capture", help="ALSA capture alias (default: capture)")
     parser.add_argument("--playback-device", default="playback", help="ALSA playback alias (default: playback)")
     parser.add_argument("--capture-seconds", type=float, default=6, help="Seconds per turn, up to 15 (default: 6)")
     parser.add_argument("--connect-timeout", type=float, default=60, help="Overall initial connection retry budget (default: 60s)")
     parser.add_argument("--response-timeout", type=float, default=120, help="Overall upload/response budget (default: 120s)")
+    parser.add_argument(
+        "--hands-free",
+        action="store_true",
+        help="Continuously stream PCM for wake inference on the gateway",
+    )
     parser.add_argument("--once", action="store_true", help="Run one turn immediately, then exit")
     parser.add_argument("--input-wav", type=Path, help="With --once: upload a 16kHz mono PCM16 WAV instead of capturing")
     parser.add_argument("--output-wav", type=Path, help="Save validated reply WAV as runtime test evidence; playback stays enabled by default")
@@ -447,6 +612,8 @@ def parse_options(argv: list[str] | None = None) -> Options:
         parser.error("--no-playback requires --once, --input-wav and --output-wav")
     if args.input_wav and not args.once:
         parser.error("--input-wav requires --once")
+    if args.hands_free and (args.input_wav or args.no_playback):
+        parser.error("--hands-free requires live capture and playback")
     return Options(**vars(args))
 
 

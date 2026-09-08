@@ -187,6 +187,13 @@ def activate(release: Path, revision: str) -> None:
                 raise ValueError("Gateway credentials are not configured")
             if current.get("commit", current.get("revision")) != revision:
                 raise ValueError("Gateway has not loaded this revision yet")
+            wake = current.get("wake", {})
+            if not wake.get("loaded") or wake.get("model") != "hey_tonny":
+                raise ValueError("Gateway wake detector is not loaded")
+            if wake.get("sha256") != (
+                "558bd199797084e41f6e1e9fd3cd330fb9920af5d55e06d2c647659bab33a5a0"
+            ):
+                raise ValueError("Gateway wake model checksum is not the approved artifact")
             print(json.dumps(current, sort_keys=True))
             break
         except (OSError, ValueError):

@@ -32,6 +32,7 @@ def hello(**updates):
         (hello(encoding="float32"), "protocol_error"),
         (hello(session_id="not-uuid"), "protocol_error"),
         (hello(version="9.0.0"), "protocol_error"),
+        (hello(mode="unknown"), "protocol_error"),
         (b"\x00\x00", "invalid_state"),
     ],
 )
@@ -101,6 +102,20 @@ class Engine(VoiceEngine):
         return Reply("Hello", "Hi", b"RIFF-test-WAV")
 
 
+class FakeWake:
+    model_name = "hey_tonny"
+
+    def __init__(self, scores):
+        self.scores = iter(scores)
+        self.reset_calls = 0
+
+    def reset(self):
+        self.reset_calls += 1
+
+    def score(self, _pcm):
+        return next(self.scores, 0.0)
+
+
 def test_complete_wire_turn_and_health_admit_actual_evidence(settings):
     engine = Engine(settings)
     app = create_app(settings, engine=engine)
@@ -122,6 +137,72 @@ def test_complete_wire_turn_and_health_admit_actual_evidence(settings):
         assert list(engine.history) == [("Hello", "Hi")]
         assert client.get("/healthz").json()["evidence_since_start"]["responses_sent"] == 1
         assert client.post("/v1/reset").json()["conversation_turns"] == 0
+
+
+def test_continuous_mode_detects_upstream_and_preserves_bounded_request_audio(settings):
+    cfg = settings.model_copy(
+        update={
+            "wake_preroll_seconds": 0.08,
+            "wake_post_seconds": 0.16,
+            "max_input_seconds": 1,
+        }
+    )
+    detector = FakeWake([0.0, 0.9])
+    engine = Engine(cfg)
+    app = create_app(cfg, engine=engine, wake_detector=detector)
+    frames = [bytes([index, 0]) * 1_280 for index in range(1, 5)]
+    with TestClient(app) as client, client.websocket_connect("/v1/voice") as ws:
+        greeting = hello(mode="continuous")
+        ws.send_json(greeting)
+        assert ws.receive_json() == {"type": "ready", "session_id": greeting["session_id"]}
+        for frame in frames:
+            ws.send_bytes(frame)
+        assert ws.receive_json() == {
+            "type": "wake_detected",
+            "model": "hey_tonny",
+            "score": 0.9,
+        }
+        assert ws.receive_json() == {"type": "response_start", "format": "wav", "final": True}
+        assert ws.receive_bytes() == b"RIFF-test-WAV"
+        assert ws.receive_json() == {"type": "response_end"}
+        health = client.get("/healthz").json()
+    assert detector.reset_calls == 1
+    assert engine.received == [b"".join(frames[1:])]
+    assert health["evidence_since_start"]["wake_detected"] == 1
+    assert health["evidence_since_start"]["responses_sent"] == 1
+
+
+def test_continuous_mode_drains_pcm_while_provider_runs(settings):
+    cfg = settings.model_copy(
+        update={
+            "wake_preroll_seconds": 0.08,
+            "wake_post_seconds": 0.08,
+            "max_input_seconds": 1,
+            "response_timeout_seconds": 0.05,
+        }
+    )
+    engine = Engine(cfg, stall=True)
+    app = create_app(cfg, engine=engine, wake_detector=FakeWake([0.9]))
+    frame = b"\1\0" * 1_280
+    with TestClient(app) as client, client.websocket_connect("/v1/voice") as ws:
+        ws.send_json(hello(mode="continuous"))
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_bytes(frame)
+        assert ws.receive_json()["type"] == "wake_detected"
+        ws.send_bytes(frame)
+        for _ in range(4):
+            ws.send_bytes(frame)
+        assert ws.receive_json()["code"] == "timeout"
+    assert engine.cancelled
+    assert engine.received == [frame + frame]
+
+
+def test_continuous_mode_requires_loaded_gateway_detector(settings):
+    app = create_app(settings, engine=Engine(settings))
+    with TestClient(app) as client, client.websocket_connect("/v1/voice") as ws:
+        ws.send_json(hello(mode="continuous"))
+        assert ws.receive_json()["type"] == "ready"
+        assert ws.receive_json()["code"] == "wake_unavailable"
 
 
 @pytest.mark.parametrize("action", ["disconnect", "extra_input", "timeout"])

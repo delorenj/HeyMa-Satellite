@@ -1,9 +1,12 @@
 """Secrets come only from the launch environment (normally supplied by op run)."""
 
-from typing import Literal
+from pathlib import Path
+from typing import Literal, Self
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+ASSET_DIR = Path(__file__).parent / "assets"
 
 
 class Settings(BaseSettings):
@@ -19,6 +22,17 @@ class Settings(BaseSettings):
     cartesia_voice_id: str = "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4"
     commit: str = ""
     revision: str = ""
+
+    wake_enabled: bool = True
+    wake_model_path: Path = ASSET_DIR / "hey_tonny.onnx"
+    wake_melspec_model_path: Path = ASSET_DIR / "melspectrogram.onnx"
+    wake_embedding_model_path: Path = ASSET_DIR / "embedding_model.onnx"
+    wake_model_sha256: str = "558bd199797084e41f6e1e9fd3cd330fb9920af5d55e06d2c647659bab33a5a0"
+    wake_threshold: float = Field(default=0.5, ge=0, le=1)
+    wake_trigger_frames: int = Field(default=1, ge=1, le=5)
+    wake_preroll_seconds: float = Field(default=1.0, gt=0, le=3)
+    wake_post_seconds: float = Field(default=6.0, gt=0, le=15)
+    continuous_timeout_seconds: float = Field(default=300, gt=0, le=3600)
 
     max_input_seconds: int = Field(default=20, ge=1, le=60)
     max_frame_bytes: int = Field(default=65536, ge=2560, le=262144)
@@ -44,3 +58,21 @@ class Settings(BaseSettings):
     @property
     def max_input_bytes(self) -> int:
         return self.max_input_seconds * 16000 * 2
+
+    @property
+    def wake_preroll_bytes(self) -> int:
+        return int(self.wake_preroll_seconds * 16000) * 2
+
+    @property
+    def wake_post_bytes(self) -> int:
+        return int(self.wake_post_seconds * 16000) * 2
+
+    @model_validator(mode="after")
+    def validate_wake_capture_bounds(self) -> Self:
+        if (
+            self.mode == "live"
+            and self.wake_enabled
+            and self.wake_preroll_bytes + self.wake_post_bytes > self.max_input_bytes
+        ):
+            raise ValueError("wake pre-roll and post-wake audio exceed max_input_seconds")
+        return self
