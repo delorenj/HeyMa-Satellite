@@ -17,8 +17,14 @@ LiveKit are not part of this path.
 
 ## Run
 
+For browser conversations, WAV testing, and offline audio echo without the Pi,
+run `mise run tonny:local:up` and open `http://localhost:18779`. See the
+[local container guide](../../docs/local-development.md) for live providers,
+automatic reload, and the isolated browser/container checks.
+
 Python 3.12 and uv are required. Resolve secrets into the process environment;
-do not write resolved values into files.
+do not write resolved values into files. These host requirements apply to the
+direct launch below; the container workflow installs voice dependencies in its images.
 
 ```sh
 uv sync --project apps/voice --frozen
@@ -28,9 +34,10 @@ op run --env-file deploy/tonny/voice.env.op -- \
 
 | Environment variable | Purpose / default |
 |---|---|
-| `TONNY_DEEPGRAM_API_KEY` | Required STT credential |
-| `TONNY_CARTESIA_API_KEY` | Required TTS credential |
-| `TONNY_LLM_API_KEY` | Required OpenRouter credential |
+| `TONNY_MODE` | `live` (application default) or `loopback` (local Compose default) |
+| `TONNY_DEEPGRAM_API_KEY` | Required STT credential in live mode |
+| `TONNY_CARTESIA_API_KEY` | Required TTS credential in live mode |
+| `TONNY_LLM_API_KEY` | Required OpenRouter credential in live mode |
 | `TONNY_LLM_MODEL` | `openrouter/openai/gpt-4.1-mini`; an `openai/...` ID is also accepted |
 | `TONNY_DEEPGRAM_MODEL` | `nova-3-general` |
 | `TONNY_CARTESIA_MODEL` | `sonic-3` |
@@ -58,7 +65,9 @@ the finalized transcript. A first `from_finalize` result is insufficient: a
 live test returned only the first 0.4 seconds of a 2.6-second upload that way.
 
 `GET /healthz` separates provider configuration from counters for actual STT,
-LLM, TTS and websocket response completion. A configured key does not prove
+LLM, TTS and websocket response completion, and reports the active `mode`.
+Loopback returns received PCM as a WAV without importing providers, retaining
+conversation, or incrementing STT/LLM/TTS evidence. A configured key does not prove
 provider capability. The protocol does not acknowledge physical playback, so
 the gateway cannot claim the user heard a response. Conversation is committed
 only after `response_end` is sent and disappears on restart. `POST /v1/reset`
@@ -72,6 +81,7 @@ does not carry client authentication or support concurrent speakers or barge-in.
 ```sh
 uv run --project apps/voice pytest apps/voice/tests -q
 uv run --project apps/voice ruff check apps/voice
+mise run tonny:local:check
 ```
 
 Tests run real Pipecat workers and the real Line SDK around controlled provider

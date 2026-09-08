@@ -1,6 +1,7 @@
 """Wire and process-lifecycle tests; no microphone, provider or real gateway needed."""
 
 import asyncio
+from contextlib import redirect_stderr
 from dataclasses import replace
 import io
 import json
@@ -82,6 +83,20 @@ class AudioValidationTests(unittest.TestCase):
         gate.busy = False
         self.assertTrue(gate.trigger())
 
+    def test_no_playback_requires_all_three_companion_flags(self):
+        groups = (("--once",), ("--input-wav", "/tmp/input.wav"), ("--output-wav", "/tmp/reply.wav"))
+        for mask in range(7):
+            argv = ["--no-playback"]
+            for index, group in enumerate(groups):
+                if mask & (1 << index):
+                    argv.extend(group)
+            with self.subTest(argv=argv), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                sat.parse_options(argv)
+            self.assertEqual(error.exception.code, 2)
+        options = sat.parse_options(["--no-playback", "--once", "--input-wav", "/tmp/input.wav", "--output-wav", "/tmp/reply.wav"])
+        self.assertTrue(options.no_playback)
+        self.assertFalse(sat.parse_options([]).no_playback)
+
 
 class WireTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -147,6 +162,50 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
             playback.assert_awaited_once_with(options, wav_bytes(rate=24_000))
             self.assertEqual(output.read_bytes(), wav_bytes(rate=24_000))
         self.assertEqual(b"".join(value for value in self.received if isinstance(value, bytes)), pcm)
+
+    async def test_headless_turn_preserves_pcm_saves_valid_wav_and_never_opens_alsa(self):
+        options = await self.start_server(self.normal_response)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "input.wav"
+            output = Path(directory) / "reply.wav"
+            pcm = b"\x03\x00" * 2501
+            source.write_bytes(wav_bytes(pcm))
+            options = replace(options, once=True, input_wav=source, output_wav=output, no_playback=True)
+            with patch.object(sat.asyncio, "create_subprocess_exec", side_effect=AssertionError("ALSA must not open")) as spawn, patch.object(sat, "log") as logged:
+                await sat.run_turn(options)
+            spawn.assert_not_called()
+            self.assertEqual(output.read_bytes(), wav_bytes(rate=24_000))
+            self.assertEqual(sat.validate_wav(output.read_bytes()).sample_rate, 24_000)
+            stages = [call.args[0] for call in logged.call_args_list]
+            self.assertEqual(stages[-1], "response_saved")
+            self.assertEqual(logged.call_args.kwargs["playback"], "skipped")
+            self.assertNotIn("playback_complete", stages)
+        self.assertEqual(b"".join(value for value in self.received if isinstance(value, bytes)), pcm)
+
+    async def test_headless_turn_rejects_malformed_reply_without_saving_or_alsa(self):
+        async def malformed(websocket):
+            await self.read_turn(websocket)
+            await websocket.send(json.dumps({"type": "response_start", "format": "wav"}))
+            await websocket.send(wav_bytes()[:-2])
+            await websocket.send(json.dumps({"type": "response_end"}))
+        options = await self.start_server(malformed)
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "input.wav"
+            output = Path(directory) / "reply.wav"
+            source.write_bytes(wav_bytes())
+            options = replace(options, once=True, input_wav=source, output_wav=output, no_playback=True)
+            with patch.object(sat.asyncio, "create_subprocess_exec") as spawn, patch.object(sat, "log") as logged:
+                with self.assertRaisesRegex(sat.ClientError, "invalid_wav_length"):
+                    await sat.run_turn(options)
+            spawn.assert_not_called()
+            self.assertFalse(output.exists())
+            self.assertNotIn("response_saved", [call.args[0] for call in logged.call_args_list])
+
+    async def test_invalid_headless_options_cannot_capture_when_cli_is_bypassed(self):
+        with patch.object(sat.asyncio, "create_subprocess_exec") as spawn:
+            with self.assertRaisesRegex(sat.ClientError, "no_playback_requires_once_input_wav_output_wav"):
+                await sat.run_turn(sat.Options(no_playback=True))
+        spawn.assert_not_called()
 
     async def test_invalid_ready_closes_without_sending_audio(self):
         received = []

@@ -45,6 +45,7 @@ class Options:
     once: bool = False
     input_wav: Path | None = None
     output_wav: Path | None = None
+    no_playback: bool = False
 
 
 @dataclass(frozen=True)
@@ -324,6 +325,8 @@ async def play_audio(options: Options, wav: bytes) -> None:
 
 
 async def run_turn(options: Options, session_id: str | None = None) -> None:
+    if options.no_playback and not (options.once and options.input_wav and options.output_wav):
+        raise ClientError("no_playback_requires_once_input_wav_output_wav")
     started = time.monotonic()
     session_id = session_id or str(uuid4())
     log("capture_started", session_id=session_id,
@@ -340,6 +343,10 @@ async def run_turn(options: Options, session_id: str | None = None) -> None:
         elapsed_seconds=round(time.monotonic() - started, 3))
     if options.output_wav:
         options.output_wav.write_bytes(wav)
+    if options.no_playback:
+        log("response_saved", session_id=session_id, bytes=len(wav), playback="skipped",
+            elapsed_seconds=round(time.monotonic() - started, 3))
+        return
     # No connection or replay logic follows this point.
     await play_audio(options, wav)
     log("playback_complete", session_id=session_id,
@@ -419,9 +426,10 @@ def parse_options(argv: list[str] | None = None) -> Options:
     parser.add_argument("--capture-seconds", type=float, default=6, help="Seconds per turn, up to 15 (default: 6)")
     parser.add_argument("--connect-timeout", type=float, default=60, help="Overall initial connection retry budget (default: 60s)")
     parser.add_argument("--response-timeout", type=float, default=120, help="Overall upload/response budget (default: 120s)")
-    parser.add_argument("--once", action="store_true", help="Capture and play one turn immediately, then exit")
+    parser.add_argument("--once", action="store_true", help="Run one turn immediately, then exit")
     parser.add_argument("--input-wav", type=Path, help="With --once: upload a 16kHz mono PCM16 WAV instead of capturing")
-    parser.add_argument("--output-wav", type=Path, help="Save validated reply WAV as runtime test evidence, then still play it")
+    parser.add_argument("--output-wav", type=Path, help="Save validated reply WAV as runtime test evidence; playback stays enabled by default")
+    parser.add_argument("--no-playback", action="store_true", help="Save reply without ALSA; requires --once, --input-wav and --output-wav")
     args = parser.parse_args(argv)
     if not math.isfinite(args.capture_seconds) or not 0.02 <= args.capture_seconds <= MAX_CAPTURE_SECONDS:
         parser.error("--capture-seconds must be between 0.02 and 15")
@@ -435,6 +443,8 @@ def parse_options(argv: list[str] | None = None) -> Options:
         valid_url = False
     if not valid_url:
         parser.error("--url must be a valid ws:// or wss:// URL")
+    if args.no_playback and not (args.once and args.input_wav and args.output_wav):
+        parser.error("--no-playback requires --once, --input-wav and --output-wav")
     if args.input_wav and not args.once:
         parser.error("--input-wav requires --once")
     return Options(**vars(args))

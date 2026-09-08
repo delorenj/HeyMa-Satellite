@@ -35,6 +35,7 @@ from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.workers.runner import WorkerRunner
 
 from tonny_voice.config import Settings
+from tonny_voice.loopback import Reply, VoiceError
 
 PROMPT = (
     "You are Tonny, a friendly household voice assistant speaking through a little "
@@ -43,12 +44,6 @@ PROMPT = (
     "You can converse and answer general questions; you have no tools to operate "
     "devices, browse, or perform actions. Never claim to have performed an action."
 )
-
-
-class VoiceError(Exception):
-    def __init__(self, code: str, message: str):
-        super().__init__(message)
-        self.code = code
 
 
 @dataclass
@@ -247,13 +242,6 @@ async def run_pipeline(
         )
 
 
-@dataclass(frozen=True)
-class Reply:
-    transcript: str
-    text: str
-    wav: bytes
-
-
 class VoiceEngine:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -362,6 +350,8 @@ class VoiceEngine:
     def remember(self, reply: Reply) -> None:
         # Commit conversation only after response_end was sent successfully.
         # The protocol has no playback acknowledgement; do not claim hearing it.
+        if reply.transcript is None or reply.text is None:
+            return
         self.history.append((reply.transcript, reply.text))
         self.last_turn_at = time.monotonic()
 

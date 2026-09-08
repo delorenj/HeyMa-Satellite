@@ -35,8 +35,10 @@ def hello(**updates):
         (b"\x00\x00", "invalid_state"),
     ],
 )
-def test_reject_invalid_handshakes(settings, first, code):
-    with TestClient(create_app(settings)) as client, client.websocket_connect("/v1/voice") as ws:
+@pytest.mark.parametrize("mode", ["live", "loopback"])
+def test_reject_invalid_handshakes(settings, first, code, mode):
+    cfg = settings.model_copy(update={"mode": mode})
+    with TestClient(create_app(cfg)) as client, client.websocket_connect("/v1/voice") as ws:
         if isinstance(first, bytes):
             ws.send_bytes(first)
         elif isinstance(first, str):
@@ -57,8 +59,9 @@ def test_reject_invalid_handshakes(settings, first, code):
         ([b"\0\0"], {"type": "surprise"}, "invalid_state"),
     ],
 )
-def test_reject_malformed_audio_and_out_of_order_messages(settings, chunks, ending, code):
-    cfg = settings.model_copy(update={"max_input_seconds": 1})
+@pytest.mark.parametrize("mode", ["live", "loopback"])
+def test_reject_malformed_audio_and_out_of_order_messages(settings, chunks, ending, code, mode):
+    cfg = settings.model_copy(update={"max_input_seconds": 1, "mode": mode})
     with TestClient(create_app(cfg)) as client, client.websocket_connect("/v1/voice") as ws:
         greeting = hello()
         ws.send_json(greeting)
@@ -70,8 +73,10 @@ def test_reject_malformed_audio_and_out_of_order_messages(settings, chunks, endi
         assert ws.receive_json()["code"] == code
 
 
-def test_one_active_session_and_reset_conflict(settings):
-    with TestClient(create_app(settings)) as client, client.websocket_connect("/v1/voice") as first:
+@pytest.mark.parametrize("mode", ["live", "loopback"])
+def test_one_active_session_and_reset_conflict(settings, mode):
+    cfg = settings.model_copy(update={"mode": mode})
+    with TestClient(create_app(cfg)) as client, client.websocket_connect("/v1/voice") as first:
         first.send_json(hello())
         assert first.receive_json()["type"] == "ready"
         assert client.post("/v1/reset").status_code == 409
@@ -142,8 +147,9 @@ def test_disconnect_and_timeout_cancel_pending_provider_work(settings, action):
         assert list(engine.history) == []
 
 
-def test_idle_input_deadline_releases_single_session_slot(settings):
-    cfg = settings.model_copy(update={"input_timeout_seconds": 0.02})
+@pytest.mark.parametrize("mode", ["live", "loopback"])
+def test_idle_input_deadline_releases_single_session_slot(settings, mode):
+    cfg = settings.model_copy(update={"input_timeout_seconds": 0.02, "mode": mode})
     with TestClient(create_app(cfg)) as client, client.websocket_connect("/v1/voice") as ws:
         ws.send_json(hello())
         ws.receive_json()

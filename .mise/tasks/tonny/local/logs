@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Show local Tonny gateway logs"
+set -euo pipefail
+tonny_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+exec python3 "$tonny_root/deploy/tonny/local.py" logs "$@"

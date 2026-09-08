@@ -1,22 +1,31 @@
 """The single-satellite v0.1 PCM/WAV websocket boundary."""
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import contextlib
 import json
 import logging
 from importlib.metadata import version
-from typing import Literal
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from tonny_voice.config import Settings
-from tonny_voice.pipeline import VoiceEngine, VoiceError
+from tonny_voice.loopback import LoopbackEngine, VoiceError
+
+if TYPE_CHECKING:
+    from tonny_voice.pipeline import VoiceEngine
 
 log = logging.getLogger("tonny_voice")
+STATIC_DIR = Path(__file__).parent / "static"
 
 
 class Hello(BaseModel):
@@ -81,7 +90,7 @@ async def read_input(ws: WebSocket, cfg: Settings) -> bytes:
             return bytes(audio)
 
 
-async def respond(ws: WebSocket, engine: VoiceEngine, pcm: bytes) -> None:
+async def respond(ws: WebSocket, engine: VoiceEngine | LoopbackEngine, pcm: bytes) -> None:
     """Monitor the receive side while providers run; a lost Pi cancels the work."""
     processing = asyncio.create_task(engine.process(pcm))
     incoming = asyncio.create_task(receive(ws))
@@ -105,9 +114,30 @@ async def respond(ws: WebSocket, engine: VoiceEngine, pcm: bytes) -> None:
         await asyncio.gather(processing, incoming, return_exceptions=True)
 
 
-def create_app(settings: Settings | None = None, *, engine: VoiceEngine | None = None) -> FastAPI:
+def configure_logging() -> None:
+    # SDK DEBUG logs include transcript text. Initialize in the application
+    # factory as well as the CLI so reload workers retain the same INFO policy.
+    from loguru import logger
+
+    logger.remove()
+    logger.add(lambda message: print(message, end=""), level="INFO")
+    logging.basicConfig(level=logging.INFO)
+
+
+def create_app(
+    settings: Settings | None = None, *, engine: VoiceEngine | LoopbackEngine | None = None
+) -> FastAPI:
+    configure_logging()
     cfg = settings or Settings()
-    voice = engine or VoiceEngine(cfg)
+    if engine is not None:
+        voice = engine
+    elif cfg.mode == "loopback":
+        voice = LoopbackEngine(cfg)
+    else:
+        # Offline loopback never imports provider SDKs or constructs their services.
+        from tonny_voice.pipeline import VoiceEngine
+
+        voice = VoiceEngine(cfg)
     app = FastAPI(title="Tonny Voice", docs_url=None, redoc_url=None)
     app.state.engine = voice
     app.state.active = False
@@ -119,11 +149,16 @@ def create_app(settings: Settings | None = None, *, engine: VoiceEngine | None =
         return {
             "ok": True,
             "service": "tonny-voice",
+            "mode": cfg.mode,
             "commit": cfg.revision or cfg.commit,
             "revision": cfg.revision or cfg.commit,
             "configured": cfg.configured,
             "active_session": app.state.active,
-            "pipeline": "pipecat-deepgram -> cartesia-line-llm -> pipecat-cartesia-tts",
+            "pipeline": (
+                "pcm -> wav-loopback"
+                if cfg.mode == "loopback"
+                else "pipecat-deepgram -> cartesia-line-llm -> pipecat-cartesia-tts"
+            ),
             "models": {
                 "stt": cfg.deepgram_model,
                 "llm": cfg.llm_model,
@@ -177,7 +212,7 @@ def create_app(settings: Settings | None = None, *, engine: VoiceEngine | None =
                         "Expected UUID4 session, PCM S16_LE 16000 Hz mono, v0.1.0.",
                     ) from exc
             session = hello.session_id
-            if not all(cfg.configured.values()):
+            if cfg.mode == "live" and not all(cfg.configured.values()):
                 raise VoiceError(
                     "not_configured", "The gateway's voice providers are not configured."
                 )
@@ -207,6 +242,12 @@ def create_app(settings: Settings | None = None, *, engine: VoiceEngine | None =
             with contextlib.suppress(WebSocketDisconnect, RuntimeError, OSError):
                 await ws.close()
 
+    app.mount("/static", StaticFiles(directory=STATIC_DIR, check_dir=False), name="static")
+
+    @app.get("/", include_in_schema=False)
+    async def index():
+        return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+
     return app
 
 
@@ -214,17 +255,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Tonny Pipecat + Line voice gateway")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=18778)
+    parser.add_argument("--reload", action="store_true", help="Reload when Python source changes")
+    parser.add_argument(
+        "--reload-dir", action="append", metavar="PATH", help="Directory to watch (repeatable)"
+    )
     args = parser.parse_args()
-    # SDK DEBUG logs include transcript text. Keep operational evidence concise.
-    from loguru import logger
-
-    logger.remove()
-    logger.add(lambda message: print(message, end=""), level="INFO")
-    logging.basicConfig(level=logging.INFO)
+    configure_logging()
     uvicorn.run(
-        create_app(),
+        "tonny_voice.app:create_app",
+        factory=True,
         host=args.host,
         port=args.port,
+        reload=args.reload,
+        reload_dirs=(args.reload_dir or [str(Path(__file__).parent)]) if args.reload else None,
         ws_max_size=262144,
         ws_max_queue=16,
         limit_concurrency=16,

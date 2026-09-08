@@ -1,7 +1,8 @@
 # Tonny push-to-talk client
 
-Python 3.11+ and ALSA `arecord`/`aplay` are required. The Pi only captures and
-plays audio; recognition, Pipecat and the agent run on the gateway.
+Python 3.11+ is required. The Pi uses ALSA `arecord`/`aplay` to capture and play
+audio; recognition, Pipecat and the agent run on the gateway. Headless WAV
+verification does not require ALSA.
 
 ```bash
 python3 -m venv /tmp/tonny-client-venv
@@ -23,6 +24,18 @@ initial retry window; `--response-timeout` bounds the upload and complete reply.
 `--once --input-wav /tmp/question.wav` sends a known 16 kHz mono PCM16 WAV through
 the same wire path and still plays the response. `--output-wav /tmp/reply.wav`
 saves the validated reply for test evidence. Keep audio outside the source tree.
+
+For headless verification, add `--no-playback`. This option requires `--once`,
+`--input-wav` and `--output-wav` together:
+
+```bash
+python apps/satellite/satellite.py --once --input-wav /tmp/question.wav \
+  --output-wav /tmp/reply.wav --no-playback
+```
+
+The client uploads the input PCM, validates and saves the complete WAV reply,
+and logs `response_saved` with `playback:"skipped"`. It does not open `arecord`
+or `aplay`, and malformed replies are rejected before saving.
 
 Input stays in RAM, limited to 15 seconds (480,000 bytes). Initial connection
 failures retry with backoff for up to 60 seconds by default. A turn is never

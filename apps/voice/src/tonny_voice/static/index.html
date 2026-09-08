@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <title>Tonny · Local voice lab</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script type="module" src="/static/app.js"></script>
+  </head>
+  <body data-phase="idle">
+    <main>
+      <header class="page-header">
+        <div class="brand"><span class="brand-mark" aria-hidden="true">t.</span><span>Tonny</span></div>
+        <span class="mode" id="mode" data-testid="mode">Checking mode…</span>
+      </header>
+
+      <section class="intro" aria-labelledby="page-title">
+        <p class="eyebrow">LOCAL VOICE LAB</p>
+        <h1 id="page-title">Talk to Tonny.</h1>
+        <p>Try a voice turn from your browser, wherever the board happens to be.</p>
+      </section>
+
+      <div class="workspace">
+        <section class="card capture-card" aria-labelledby="capture-title">
+          <div class="card-heading"><span class="step">01</span><h2 id="capture-title">Say something</h2></div>
+          <p>Record a short message, or send an existing WAV.</p>
+          <div class="recording-visual" aria-hidden="true">
+            <div class="voice-ring"><span class="voice-bars"><i></i><i></i><i></i><i></i><i></i></span></div>
+          </div>
+          <div class="duration-row">
+            <label for="duration">Recording limit</label>
+            <select id="duration" data-testid="duration">
+              <option value="3">3 seconds</option>
+              <option value="6" selected>6 seconds</option>
+              <option value="10">10 seconds</option>
+              <option value="15">15 seconds</option>
+            </select>
+          </div>
+          <progress id="capture-progress" value="0" max="6" aria-label="Recording progress"></progress>
+          <div class="capture-timing"><span id="capture-time">0.0 / 6.0 s</span><span>Stops and sends automatically</span></div>
+          <div class="actions">
+            <button class="primary" id="record" data-testid="record" type="button">Record</button>
+            <button class="primary" id="stop-send" data-testid="stop-send" type="button" hidden>Stop and send</button>
+            <button class="secondary" id="cancel" data-testid="cancel" type="button" hidden>Cancel</button>
+          </div>
+          <div class="upload">
+            <label for="wav-upload">Upload WAV</label>
+            <input id="wav-upload" data-testid="wav-upload" type="file" accept=".wav,audio/wav,audio/x-wav" aria-describedby="wav-hint">
+            <small id="wav-hint">16 kHz · mono · PCM16 · up to 15 seconds</small>
+          </div>
+          <a id="download-request" data-testid="download-request" class="download" download="tonny-request.wav" hidden>Download submitted WAV</a>
+        </section>
+
+        <section class="card reply-card" aria-labelledby="reply-title">
+          <div class="card-heading"><span class="step">02</span><h2 id="reply-title">Hear it back</h2></div>
+          <p id="mode-description">Checking the local gateway.</p>
+          <div id="status" data-testid="status" class="status" role="status" aria-live="polite" aria-atomic="true">
+            <span class="status-dot" aria-hidden="true"></span>
+            <div><strong id="status-title">Ready when you are</strong><p id="status-detail">Record a message or upload a WAV to begin.</p></div>
+          </div>
+          <p class="error" id="error" data-testid="error" role="alert" hidden></p>
+          <div class="reply-player" id="reply-player" hidden>
+            <audio id="reply-audio" data-testid="reply-audio" controls preload="metadata" aria-label="Tonny reply"></audio>
+            <p id="reply-details" class="audio-details"></p>
+            <div class="reply-actions">
+              <button class="secondary" id="play-reply" data-testid="play-reply" type="button">Play reply</button>
+              <a id="download-reply" data-testid="download-reply" class="download" download="tonny-reply.wav">Download reply WAV</a>
+            </div>
+          </div>
+          <div class="gateway-summary">
+            <div><span class="eyebrow">GATEWAY</span><strong id="gateway-state">Connecting…</strong></div>
+            <p id="evidence">No turn submitted from this page yet.</p>
+          </div>
+          <button class="text-button" id="reset" data-testid="reset" type="button">Reset conversation</button>
+        </section>
+      </div>
+
+      <footer><p id="privacy-note">Audio handling follows the gateway mode shown above.</p><p>Tonny local development</p></footer>
+    </main>
+  </body>
+</html>

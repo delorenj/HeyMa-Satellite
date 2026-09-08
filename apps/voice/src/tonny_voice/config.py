@@ -1,5 +1,7 @@
 """Secrets come only from the launch environment (normally supplied by op run)."""
 
+from typing import Literal
+
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -7,6 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="TONNY_", extra="ignore")
 
+    mode: Literal["live", "loopback"] = "live"
     deepgram_api_key: SecretStr = SecretStr("")
     cartesia_api_key: SecretStr = SecretStr("")
     llm_api_key: SecretStr = SecretStr("")

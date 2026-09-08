@@ -1,0 +1,58 @@
+name: tonny-local
+
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: deploy/tonny/Dockerfile.voice
+      target: gateway
+    init: true
+    ports:
+      - "127.0.0.1:${TONNY_LOCAL_PORT:-18779}:18778"
+    env_file:
+      - deploy/tonny/voice.conf
+    environment:
+      TONNY_MODE: ${TONNY_MODE:-loopback}
+      TONNY_REVISION: ${TONNY_REVISION:-local-worktree}
+      TONNY_DEEPGRAM_API_KEY: ${TONNY_DEEPGRAM_API_KEY:-}
+      TONNY_CARTESIA_API_KEY: ${TONNY_CARTESIA_API_KEY:-}
+      TONNY_LLM_API_KEY: ${TONNY_LLM_API_KEY:-}
+      WATCHFILES_FORCE_POLLING: "true"
+    volumes:
+      - ${TONNY_VOICE_SOURCE:-./apps/voice/src}:/app/src:ro
+    command: ["tonny-voice", "--host", "0.0.0.0", "--port", "18778", "--reload", "--reload-dir", "/app/src"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18778/healthz', timeout=3).read()"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  satellite:
+    profiles: [tools]
+    build:
+      context: .
+      dockerfile: deploy/tonny/Dockerfile.satellite
+    init: true
+    environment:
+      TONNY_GATEWAY_URL: ws://gateway:18778/v1/voice
+    volumes:
+      - ./apps/satellite/satellite.py:/app/satellite.py:ro
+    depends_on:
+      gateway:
+        condition: service_healthy
+
+  browser-check:
+    profiles: [test]
+    build:
+      context: .
+      dockerfile: deploy/tonny/Dockerfile.voice
+      target: browser-check
+    init: true
+    # Chromium sees localhost as a microphone-capable origin in this shared namespace.
+    network_mode: service:gateway
+    environment:
+      TONNY_TEST_URL: http://127.0.0.1:18778
+    depends_on:
+      gateway:
+        condition: service_healthy
