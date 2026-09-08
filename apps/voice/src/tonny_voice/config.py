@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     wake_embedding_model_path: Path = ASSET_DIR / "embedding_model.onnx"
     wake_model_sha256: str = "558bd199797084e41f6e1e9fd3cd330fb9920af5d55e06d2c647659bab33a5a0"
     wake_threshold: float = Field(default=0.5, ge=0, le=1)
-    wake_trigger_frames: int = Field(default=1, ge=1, le=5)
+    wake_trigger_frames: int = Field(default=3, ge=1, le=5)
     wake_preroll_seconds: float = Field(default=1.0, gt=0, le=3)
     wake_post_seconds: float = Field(default=6.0, gt=0, le=15)
     continuous_timeout_seconds: float = Field(default=300, gt=0, le=3600)

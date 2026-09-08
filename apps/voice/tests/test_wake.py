@@ -39,7 +39,12 @@ def test_exact_custom_model_detects_synthetic_hey_tonny() -> None:
         detector.score(pcm[offset : offset + FRAME_BYTES])
         for offset in range(0, len(pcm), FRAME_BYTES)
     ]
-    assert max(scores) >= 0.5
+    consecutive = 0
+    longest_run = 0
+    for score in scores:
+        consecutive = consecutive + 1 if score >= detector.settings.wake_threshold else 0
+        longest_run = max(longest_run, consecutive)
+    assert longest_run >= detector.settings.wake_trigger_frames
 
 
 def test_thirty_seconds_of_digital_silence_never_crosses_threshold() -> None:
@@ -61,7 +66,20 @@ def test_invalid_or_missing_custom_model_fails_gateway_startup(tmp_path: Path) -
 
 class FakeModel:
     def __init__(self, **kwargs):
-        self.models = {Path(kwargs["wakeword_models"][0]).stem: object()}
+        class Port:
+            def __init__(self, name, shape):
+                self.name = name
+                self.type = "tensor(float)"
+                self.shape = shape
+
+        class Session:
+            def get_inputs(self):
+                return [Port("embeddings", [1, 16, 96])]
+
+            def get_outputs(self):
+                return [Port("score", [1, 1])]
+
+        self.models = {Path(kwargs["wakeword_models"][0]).stem: Session()}
         self.value = 0.25
         self.reset_calls = 0
 
@@ -82,3 +100,17 @@ def test_adapter_rejects_invalid_pcm_and_scores() -> None:
         detector._model.value = value
         with pytest.raises(WakeDetectorError, match="wake_score_invalid"):
             detector.score(b"\0\0")
+
+
+def test_loadable_model_with_wrong_classifier_signature_fails_startup() -> None:
+    settings = Settings()
+    wrong_model = settings.wake_embedding_model_path
+    with pytest.raises(WakeDetectorError, match="wake_model_invalid"):
+        WakeDetector(
+            settings.model_copy(
+                update={
+                    "wake_model_path": wrong_model,
+                    "wake_model_sha256": hashlib.sha256(wrong_model.read_bytes()).hexdigest(),
+                }
+            )
+        )

@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("tonny_voice")
 STATIC_DIR = Path(__file__).parent / "static"
+WAKE_FRAME_BYTES = 2_560
 
 
 class Hello(BaseModel):
@@ -104,9 +105,9 @@ def pcm_frame(message: dict, cfg: Settings) -> bytes:
     return chunk
 
 
-def append_preroll(buffer: deque[bytes], chunk: bytes, limit: int) -> int:
+def append_preroll(buffer: deque[bytes], size: int, chunk: bytes, limit: int) -> int:
     buffer.append(chunk)
-    size = sum(map(len, buffer))
+    size += len(chunk)
     while buffer and size - len(buffer[0]) >= limit:
         size -= len(buffer.popleft())
     if size > limit:
@@ -116,51 +117,75 @@ def append_preroll(buffer: deque[bytes], chunk: bytes, limit: int) -> int:
     return size
 
 
+async def score_wake_frame(detector: WakeScorer, frame: bytes) -> float:
+    """Finish an in-flight stateful inference before allowing another session."""
+    inference = asyncio.create_task(asyncio.to_thread(detector.score, frame))
+    try:
+        return await asyncio.shield(inference)
+    except asyncio.CancelledError:
+        await asyncio.gather(inference, return_exceptions=True)
+        raise
+
+
+async def receive_continuous_pcm(ws: WebSocket, cfg: Settings) -> bytes:
+    message = await receive(ws)
+    if message.get("bytes") is not None:
+        return pcm_frame(message, cfg)
+    if control(message) == {"type": "close"}:
+        raise WebSocketDisconnect(1000)
+    raise VoiceError("invalid_state", "Continuous mode accepts PCM frames only.")
+
+
 async def read_continuous(
     ws: WebSocket, cfg: Settings, detector: WakeScorer
 ) -> tuple[WakeDetection, bytes]:
     """Detect upstream, retain bounded pre-roll, then collect a fixed request window."""
     detector.reset()
     preroll: deque[bytes] = deque()
+    preroll_size = 0
+    pending = bytearray()
     consecutive = 0
+    detection: WakeDetection | None = None
+    initial_post = b""
     async with asyncio.timeout(cfg.continuous_timeout_seconds):
-        while True:
-            message = await receive(ws)
-            if message.get("bytes") is None:
-                if control(message) == {"type": "close"}:
-                    raise WebSocketDisconnect(1000)
-                raise VoiceError("invalid_state", "Continuous mode accepts PCM frames only.")
-            chunk = pcm_frame(message, cfg)
-            append_preroll(preroll, chunk, cfg.wake_preroll_bytes)
-            try:
-                score = await asyncio.to_thread(detector.score, chunk)
-            except WakeDetectorError as exc:
-                raise VoiceError("wake_failed", "Wake detection could not process audio.") from exc
-            consecutive = consecutive + 1 if score >= cfg.wake_threshold else 0
-            if consecutive < cfg.wake_trigger_frames:
-                continue
-
-            detection = WakeDetection(detector.model_name, score)
-            await ws.send_json(
-                {"type": "wake_detected", "model": detection.model, "score": detection.score}
-            )
-            audio = bytearray(b"".join(preroll))
-            post_bytes = 0
-            while post_bytes < cfg.wake_post_bytes:
-                message = await receive(ws)
-                if message.get("bytes") is None:
-                    if control(message) == {"type": "close"}:
-                        raise WebSocketDisconnect(1000)
-                    raise VoiceError("invalid_state", "Continuous mode accepts PCM frames only.")
-                chunk = pcm_frame(message, cfg)
-                take = min(len(chunk), cfg.wake_post_bytes - post_bytes)
-                audio.extend(chunk[:take])
-                post_bytes += take
-            if not audio or len(audio) > cfg.max_input_bytes:
-                raise VoiceError(
-                    "input_too_large", "The utterance exceeds the audio duration limit."
+        while detection is None:
+            pending.extend(await receive_continuous_pcm(ws, cfg))
+            consumed = 0
+            while len(pending) - consumed >= WAKE_FRAME_BYTES:
+                frame = bytes(pending[consumed : consumed + WAKE_FRAME_BYTES])
+                consumed += WAKE_FRAME_BYTES
+                preroll_size = append_preroll(
+                    preroll, preroll_size, frame, cfg.wake_preroll_bytes
                 )
-            return detection, bytes(audio)
+                try:
+                    score = await score_wake_frame(detector, frame)
+                except WakeDetectorError as exc:
+                    raise VoiceError(
+                        "wake_failed", "Wake detection could not process audio."
+                    ) from exc
+                consecutive = consecutive + 1 if score >= cfg.wake_threshold else 0
+                if consecutive >= cfg.wake_trigger_frames:
+                    detection = WakeDetection(detector.model_name, score)
+                    initial_post = bytes(pending[consumed:])
+                    break
+            if consumed:
+                del pending[:consumed]
+
+    await ws.send_json(
+        {"type": "wake_detected", "model": detection.model, "score": detection.score}
+    )
+    audio = bytearray(b"".join(preroll))
+    post_bytes = min(len(initial_post), cfg.wake_post_bytes)
+    audio.extend(initial_post[:post_bytes])
+    async with asyncio.timeout(cfg.wake_post_seconds + 5):
+        while post_bytes < cfg.wake_post_bytes:
+            chunk = await receive_continuous_pcm(ws, cfg)
+            take = min(len(chunk), cfg.wake_post_bytes - post_bytes)
+            audio.extend(chunk[:take])
+            post_bytes += take
+    if not audio or len(audio) > cfg.max_input_bytes:
+        raise VoiceError("input_too_large", "The utterance exceeds the audio duration limit.")
+    return detection, bytes(audio)
 
 
 async def drain_continuous_input(ws: WebSocket, cfg: Settings) -> None:

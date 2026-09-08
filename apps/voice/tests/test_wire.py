@@ -1,10 +1,11 @@
 import asyncio
+import time
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
-from tonny_voice.app import create_app
+from tonny_voice.app import create_app, read_continuous
 from tonny_voice.pipeline import Reply, VoiceEngine
 
 
@@ -108,11 +109,13 @@ class FakeWake:
     def __init__(self, scores):
         self.scores = iter(scores)
         self.reset_calls = 0
+        self.frames = []
 
     def reset(self):
         self.reset_calls += 1
 
-    def score(self, _pcm):
+    def score(self, pcm):
+        self.frames.append(pcm)
         return next(self.scores, 0.0)
 
 
@@ -144,6 +147,7 @@ def test_continuous_mode_detects_upstream_and_preserves_bounded_request_audio(se
         update={
             "wake_preroll_seconds": 0.08,
             "wake_post_seconds": 0.16,
+            "wake_trigger_frames": 1,
             "max_input_seconds": 1,
         }
     )
@@ -172,11 +176,110 @@ def test_continuous_mode_detects_upstream_and_preserves_bounded_request_audio(se
     assert health["evidence_since_start"]["responses_sent"] == 1
 
 
+@pytest.mark.parametrize("packet_size", [2, 5_120])
+def test_continuous_mode_reframes_transport_packets_for_inference(settings, packet_size):
+    cfg = settings.model_copy(
+        update={
+            "wake_preroll_seconds": 0.08,
+            "wake_post_seconds": 0.08,
+            "wake_trigger_frames": 1,
+            "max_input_seconds": 1,
+        }
+    )
+    detector = FakeWake([0.9])
+    engine = Engine(cfg)
+    app = create_app(cfg, engine=engine, wake_detector=detector)
+    detection_frame = b"\1\0" * 1_280
+    post_frame = b"\2\0" * 1_280
+    stream = detection_frame + post_frame
+    with TestClient(app) as client, client.websocket_connect("/v1/voice") as ws:
+        ws.send_json(hello(mode="continuous"))
+        assert ws.receive_json()["type"] == "ready"
+        for offset in range(0, len(stream), packet_size):
+            ws.send_bytes(stream[offset : offset + packet_size])
+        assert ws.receive_json()["type"] == "wake_detected"
+        assert ws.receive_json()["type"] == "response_start"
+        assert ws.receive_bytes() == b"RIFF-test-WAV"
+        assert ws.receive_json() == {"type": "response_end"}
+    assert detector.frames == [detection_frame]
+    assert engine.received == [stream]
+
+
+class DelayedWake(FakeWake):
+    def __init__(self, score, delay):
+        super().__init__([score])
+        self.delay = delay
+        self.scoring = False
+        self.reset_during_score = False
+
+    def reset(self):
+        self.reset_during_score |= self.scoring
+        super().reset()
+
+    def score(self, pcm):
+        self.frames.append(pcm)
+        self.scoring = True
+        try:
+            time.sleep(self.delay)
+            return next(self.scores, 0.0)
+        finally:
+            self.scoring = False
+
+
+class DirectWebSocket:
+    def __init__(self, messages, delay=0):
+        self.messages = iter(messages)
+        self.delay = delay
+        self.sent = []
+
+    async def receive(self):
+        message = next(self.messages)
+        if self.delay and self.sent:
+            await asyncio.sleep(self.delay)
+        return {"type": "websocket.receive", "bytes": message}
+
+    async def send_json(self, message):
+        self.sent.append(message)
+
+
+@pytest.mark.asyncio
+async def test_continuous_timeout_drains_inflight_stateful_inference(settings):
+    cfg = settings.model_copy(update={"continuous_timeout_seconds": 0.01})
+    detector = DelayedWake(0.0, 0.05)
+    ws = DirectWebSocket([b"\0" * 2_560])
+    with pytest.raises(TimeoutError):
+        await read_continuous(ws, cfg, detector)
+    detector.reset()
+    assert not detector.scoring
+    assert not detector.reset_during_score
+
+
+@pytest.mark.asyncio
+async def test_post_wake_capture_has_an_independent_deadline(settings):
+    cfg = settings.model_copy(
+        update={
+            "continuous_timeout_seconds": 0.06,
+            "wake_preroll_seconds": 0.08,
+            "wake_post_seconds": 0.08,
+            "wake_trigger_frames": 1,
+            "max_input_seconds": 1,
+        }
+    )
+    detector = DelayedWake(0.9, 0.04)
+    detection_frame = b"\1\0" * 1_280
+    post_frame = b"\2\0" * 1_280
+    ws = DirectWebSocket([detection_frame, post_frame], delay=0.04)
+    detection, audio = await read_continuous(ws, cfg, detector)
+    assert detection.score == 0.9
+    assert audio == detection_frame + post_frame
+
+
 def test_continuous_mode_drains_pcm_while_provider_runs(settings):
     cfg = settings.model_copy(
         update={
             "wake_preroll_seconds": 0.08,
             "wake_post_seconds": 0.08,
+            "wake_trigger_frames": 1,
             "max_input_seconds": 1,
             "response_timeout_seconds": 0.05,
         }

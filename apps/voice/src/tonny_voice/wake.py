@@ -68,6 +68,30 @@ class WakeDetector:
         models = getattr(self._model, "models", {})
         if self.model_name not in models:
             raise WakeDetectorError("wake_model_name_mismatch")
+        self._validate_runtime_model(models[self.model_name])
+
+    def _validate_runtime_model(self, session: object) -> None:
+        try:
+            inputs = session.get_inputs()
+            outputs = session.get_outputs()
+            valid_signature = (
+                len(inputs) == 1
+                and inputs[0].name == "embeddings"
+                and inputs[0].type == "tensor(float)"
+                and inputs[0].shape == [1, 16, 96]
+                and len(outputs) == 1
+                and outputs[0].name == "score"
+                and outputs[0].type == "tensor(float)"
+                and outputs[0].shape == [1, 1]
+            )
+            if not valid_signature:
+                raise ValueError("unexpected classifier signature")
+            score = self.score(b"\0" * 2_560)
+            if not math.isfinite(score):
+                raise ValueError("non-finite startup score")
+            self.reset()
+        except Exception as exc:
+            raise WakeDetectorError("wake_model_invalid") from exc
 
     def _validate_assets(self) -> None:
         paths = (
