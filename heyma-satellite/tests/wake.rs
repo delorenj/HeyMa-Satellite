@@ -57,9 +57,11 @@ async fn test_stub_detector_fires_on_sentinel_frame() {
     )
     .await
     .expect("timed out waiting for wake event")
-    .expect("wake channel closed");
+    .expect("wake channel closed")
+    .expect("wake detector failed");
 
     assert!(event.detected_at_ms > 0);
+    assert_eq!(event.score, 1.0);
 }
 
 #[tokio::test]
@@ -113,14 +115,20 @@ async fn test_stub_detector_fires_exactly_once_per_sentinel() {
 
     // Collect all events.
     let mut count = 0;
-    while let Ok(Some(event)) = tokio::time::timeout(
-        std::time::Duration::from_millis(200),
-        wake_rx.recv(),
-    )
-    .await
-    {
-        count += 1;
-        assert!(event.detected_at_ms > 0);
+    loop {
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            wake_rx.recv(),
+        )
+        .await
+        {
+            Ok(Some(Ok(event))) => {
+                count += 1;
+                assert!(event.detected_at_ms > 0);
+            }
+            Ok(Some(Err(error))) => panic!("wake detector failed: {error}"),
+            Ok(None) | Err(_) => break,
+        }
     }
     assert_eq!(count, 2, "exactly 2 wake events expected for 2 sentinel frames");
 }
@@ -140,12 +148,11 @@ async fn test_stub_detector_stops_when_sender_dropped() {
         wake_rx.recv(),
     )
     .await;
-    // Either timeout or None is acceptable. The key is no panic.
-    match result {
-        Ok(None) => {} // channel closed cleanly
-        Err(_) => {}   // timeout fine too
-        Ok(Some(_)) => panic!("unexpected wake event after sender drop"),
-    }
+    let received = result.expect("wake detector did not stop after its input closed");
+    assert!(
+        received.is_none(),
+        "unexpected wake output after input sender dropped: {received:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -156,7 +163,10 @@ async fn test_stub_detector_stops_when_sender_dropped() {
 mod real_wake_tests {
     use super::audio::AudioFrame;
     use super::config::Settings;
-    use super::wake::{OwwDetector, WakeDetector};
+    use super::wake::{
+        mel_smoke_for_test, models_load_for_test, should_trigger_for_test, OwwDetector,
+        WakeDetector,
+    };
     use std::path::PathBuf;
     use std::sync::Arc;
     use tokio::sync::mpsc;
@@ -194,31 +204,53 @@ mod real_wake_tests {
             "staged alexa.onnx not found at {:?}",
             alexa_onnx_path()
         );
-        let (_tx, rx) = mpsc::channel::<AudioFrame>(4);
-        let detector = Box::new(OwwDetector::new(settings));
-        // start() spawns the task and returns the wake_rx. If model loading
-        // fails inside the task the channel closes immediately. We verify it
-        // does NOT close within a short window (model loaded successfully).
-        let mut wake_rx = detector.start(rx);
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(3_000),
-            wake_rx.recv(),
-        )
-        .await;
-        // A timeout means the channel is open (no init failure closed it).
-        // A None result would mean the task exited, indicating init failure.
-        match result {
-            Err(_timeout) => {} // channel still open after 3 s: init succeeded
-            Ok(None) => panic!(
-                "wake_rx closed immediately: model init likely failed; check that \
-                 assets/openwakeword/alexa.onnx is present and valid"
-            ),
-            Ok(Some(_)) => {} // unexpected wake event on silent input: still a pass
-        }
+        models_load_for_test(&settings).expect("all three wake models must load successfully");
     }
 
-    /// Test 2: Feeding 5 seconds of silence (300 frames at 80 ms each) must not
-    /// produce any WakeEvent.
+    /// Test 2: the bundled mel model accepts one normalized 80 ms frame.
+    #[test]
+    fn test_real_detector_mel_only_smoke() {
+        let output = mel_smoke_for_test(&vec![0.0f32; 1280])
+            .expect("bundled mel model must run on one 80 ms frame");
+        assert_eq!(output.len(), 5 * 32);
+        assert!(output.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn test_real_detector_triggers_only_on_trailing_edge_after_debounce() {
+        assert!(!should_trigger_for_test(0.8, 0.8, 0.5, 2_000));
+        assert!(!should_trigger_for_test(0.1, 0.8, 0.5, 2_000));
+        assert!(!should_trigger_for_test(0.05, 0.5, 0.5, 2_000));
+        assert!(!should_trigger_for_test(0.05, 0.8, 0.5, 1_999));
+        assert!(should_trigger_for_test(0.05, 0.8, 0.5, 2_000));
+    }
+
+    /// Test 3: an invalid classifier path is surfaced as an explicit fatal error.
+    #[tokio::test]
+    async fn test_real_detector_reports_invalid_classifier_path() {
+        let temp_dir = tempfile::tempdir().expect("create temporary model directory");
+        let missing_model = temp_dir.path().join("missing-wake.onnx");
+        let settings = Arc::new(Settings {
+            wake_model_path: missing_model,
+            ..Settings::default()
+        });
+        let (_tx, rx) = mpsc::channel::<AudioFrame>(4);
+        let detector = Box::new(OwwDetector::new(settings));
+        let mut wake_rx = detector.start(rx);
+
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            wake_rx.recv(),
+        )
+        .await
+        .expect("timed out waiting for initialization failure")
+        .expect("wake channel closed without failure")
+        .expect_err("invalid classifier path must fail initialization");
+
+        assert!(error.to_string().contains("missing classifier model"));
+    }
+
+    /// Test 4: Feeding 30 seconds of silence must not produce any WakeEvent.
     #[tokio::test]
     async fn test_real_detector_no_false_positive_on_silence() {
         let settings = test_settings();
@@ -226,40 +258,38 @@ mod real_wake_tests {
         let detector = Box::new(OwwDetector::new(settings));
         let mut wake_rx = detector.start(rx);
 
-        // Feed 5 seconds worth of silence: 5000 ms / 80 ms = ~62 frames.
-        // Using 100 frames for a comfortable margin.
-        for _ in 0..100 {
-            let _ = tx.send(silent_frame()).await;
-        }
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            // 30_000 ms / 80 ms per frame = 375 frames.
+            for _ in 0..375 {
+                tx.send(silent_frame())
+                    .await
+                    .expect("wake detector input closed while feeding silence");
+            }
+        })
+        .await
+        .expect("timed out while feeding 30 seconds of silence");
         drop(tx);
 
-        // Drain any events that arrived.
-        let mut event_count = 0usize;
-        loop {
-            match tokio::time::timeout(
-                std::time::Duration::from_millis(500),
-                wake_rx.recv(),
-            )
-            .await
-            {
-                Ok(Some(_)) => event_count += 1,
-                Ok(None) | Err(_) => break,
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                match wake_rx.recv().await {
+                    Some(Ok(event)) => {
+                        panic!("silence produced wake event at score {}", event.score)
+                    }
+                    Some(Err(error)) => panic!("wake detector failed: {error}"),
+                    None => break,
+                }
             }
-        }
-        assert_eq!(
-            event_count, 0,
-            "silence produced {event_count} wake events, expected 0"
-        );
+        })
+        .await
+        .expect("wake detector did not finish processing 30 seconds of silence");
     }
 
-    /// Test 3: Feed a known "alexa" WAV fixture and expect at least one WakeEvent.
+    /// Test 5: Feed a known "alexa" WAV fixture and expect at least one WakeEvent.
     ///
-    /// The fixture lives at tests/fixtures/alexa.wav. If it does not exist,
-    /// this test is skipped. To record a fixture:
-    ///   arecord -f S16_LE -r 16000 -c 1 heyma-satellite/tests/fixtures/alexa.wav
-    /// Speak "alexa" into the mic, then stop the recording.
+    /// The fixture lives at tests/fixtures/alexa.wav and is sourced from the
+    /// checked-in wyoming-openwakeword fixture set.
     #[tokio::test]
-    #[ignore = "requires tests/fixtures/alexa.wav; record with: arecord -f S16_LE -r 16000 -c 1 tests/fixtures/alexa.wav"]
     async fn test_real_detector_fires_on_alexa_wav() {
         let manifest = std::env::var("CARGO_MANIFEST_DIR")
             .expect("CARGO_MANIFEST_DIR not set");
@@ -268,10 +298,7 @@ mod real_wake_tests {
             .join("fixtures")
             .join("alexa.wav");
 
-        if !wav_path.exists() {
-            eprintln!("SKIP: fixture not found at {wav_path:?}");
-            return;
-        }
+        assert!(wav_path.exists(), "fixture not found at {wav_path:?}");
 
         // Read WAV and chunk into 1280-sample (80 ms) frames.
         let mut reader = hound::WavReader::open(&wav_path)
@@ -290,18 +317,26 @@ mod real_wake_tests {
         let detector = Box::new(OwwDetector::new(settings));
         let mut wake_rx = detector.start(rx);
 
-        // Send all frames from the WAV file.
-        for chunk in all_samples.chunks(1280) {
-            let mut padded = chunk.to_vec();
-            if padded.len() < 1280 {
-                padded.resize(1280, 0);
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            // Send all frames from the WAV file.
+            for chunk in all_samples.chunks(1280) {
+                let mut padded = chunk.to_vec();
+                if padded.len() < 1280 {
+                    padded.resize(1280, 0);
+                }
+                tx.send(AudioFrame::from_samples(&padded))
+                    .await
+                    .expect("wake detector input closed while feeding alexa WAV");
             }
-            let _ = tx.send(AudioFrame::from_samples(&padded)).await;
-        }
-        // Add trailing silence to flush buffers through the pipeline.
-        for _ in 0..32 {
-            let _ = tx.send(AudioFrame::from_samples(&vec![0i16; 1280])).await;
-        }
+            // Add trailing silence to flush buffers through the pipeline.
+            for _ in 0..32 {
+                tx.send(AudioFrame::from_samples(&vec![0i16; 1280]))
+                    .await
+                    .expect("wake detector input closed while flushing alexa WAV");
+            }
+        })
+        .await
+        .expect("timed out while feeding alexa WAV");
         drop(tx);
 
         // Expect at least one WakeEvent within 5 seconds.
@@ -311,11 +346,18 @@ mod real_wake_tests {
         )
         .await
         .expect("timed out waiting for wake event on alexa WAV")
-        .expect("wake_rx closed before event");
+        .expect("wake_rx closed before event")
+        .expect("wake detector failed while processing alexa WAV");
 
         assert!(
             event.detected_at_ms > 0,
             "WakeEvent has zero timestamp"
+        );
+        assert!(
+            event.score >= test_settings().wake_threshold,
+            "wake score {} is below threshold {}",
+            event.score,
+            test_settings().wake_threshold,
         );
     }
 }

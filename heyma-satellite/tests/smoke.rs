@@ -25,7 +25,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
-use wake::{WakeDetector, WakeEvent, WAKE_SENTINEL};
+use wake::{WakeDetector, WakeDetectorError, WakeEvent, WAKE_SENTINEL};
 use config::Settings;
 
 // ---------------------------------------------------------------------------
@@ -108,7 +108,7 @@ impl WakeDetector for SmokeWakeDetector {
     fn start(
         self: Box<Self>,
         mut rx: mpsc::Receiver<AudioFrame>,
-    ) -> mpsc::Receiver<WakeEvent> {
+    ) -> mpsc::Receiver<Result<WakeEvent, WakeDetectorError>> {
         let (tx, wake_rx) = mpsc::channel(4);
         tokio::spawn(async move {
             while let Some(frame) = rx.recv().await {
@@ -118,12 +118,50 @@ impl WakeDetector for SmokeWakeDetector {
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis() as u64;
-                    if tx.send(WakeEvent { detected_at_ms: now_ms }).await.is_err() {
+                    if tx
+                        .send(Ok(WakeEvent {
+                            detected_at_ms: now_ms,
+                            score: 1.0,
+                        }))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
             }
         });
+        wake_rx
+    }
+}
+
+struct FailingWakeDetector;
+
+impl WakeDetector for FailingWakeDetector {
+    fn start(
+        self: Box<Self>,
+        _rx: mpsc::Receiver<AudioFrame>,
+    ) -> mpsc::Receiver<Result<WakeEvent, WakeDetectorError>> {
+        let (tx, wake_rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            let _ = tx
+                .send(Err(WakeDetectorError::new(
+                    "test wake detector initialization failure",
+                )))
+                .await;
+        });
+        wake_rx
+    }
+}
+
+struct ClosedWakeDetector;
+
+impl WakeDetector for ClosedWakeDetector {
+    fn start(
+        self: Box<Self>,
+        _rx: mpsc::Receiver<AudioFrame>,
+    ) -> mpsc::Receiver<Result<WakeEvent, WakeDetectorError>> {
+        let (_tx, wake_rx) = mpsc::channel(1);
         wake_rx
     }
 }
@@ -317,6 +355,70 @@ async fn test_clean_shutdown_on_signal() {
         .await
         .expect("supervisor must stop within 2s after shutdown signal");
     result.expect("supervisor task panicked").expect("supervisor returned error");
+}
+
+#[tokio::test]
+async fn test_wake_detector_failure_stops_supervisor() {
+    let settings = Arc::new(Settings::default());
+    let source = Box::new(StubAudioSource::new(vec![]));
+    let (played_tx, _played_rx) = mpsc::channel::<Vec<u8>>(1);
+    let sink = Box::new(CaptureSink::new(played_tx));
+    let detector = Box::new(FailingWakeDetector);
+    let gateway_factory: GatewayFactory = Arc::new(|| Box::new(StubGatewayClient));
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        main_mod::run_supervisor(
+            settings,
+            source,
+            sink,
+            detector,
+            gateway_factory,
+            shutdown_rx,
+        ),
+    )
+    .await
+    .expect("supervisor must stop after a fatal detector error")
+    .expect_err("fatal detector error must propagate from the supervisor");
+
+    assert!(
+        result
+            .to_string()
+            .contains("test wake detector initialization failure")
+    );
+}
+
+#[tokio::test]
+async fn test_wake_detector_channel_closure_stops_supervisor() {
+    let settings = Arc::new(Settings::default());
+    let source = Box::new(StubAudioSource::new(vec![]));
+    let (played_tx, _played_rx) = mpsc::channel::<Vec<u8>>(1);
+    let sink = Box::new(CaptureSink::new(played_tx));
+    let detector = Box::new(ClosedWakeDetector);
+    let gateway_factory: GatewayFactory = Arc::new(|| Box::new(StubGatewayClient));
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        main_mod::run_supervisor(
+            settings,
+            source,
+            sink,
+            detector,
+            gateway_factory,
+            shutdown_rx,
+        ),
+    )
+    .await
+    .expect("supervisor must stop after detector channel closure")
+    .expect_err("detector channel closure must be fatal");
+
+    assert!(
+        result
+            .to_string()
+            .contains("wake detector channel closed unexpectedly")
+    );
 }
 
 // ---------------------------------------------------------------------------

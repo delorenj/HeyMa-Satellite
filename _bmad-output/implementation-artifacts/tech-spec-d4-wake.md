@@ -3,8 +3,11 @@ title: 'D4 — Real Wake Detection via tract-onnx'
 slug: 'd4-wake-detection'
 parent: 'tech-spec-wip.md'
 created: '2026-05-11'
-status: 'in-progress'
-baseline_commit: '5eedf93'
+status: 'blocked'
+review_classification: 'bad-spec'
+blocked_by: 'Project AGENTS.md prohibits ML inference on the Pi while this spec requires on-device tract-onnx inference.'
+baseline_commit: '65f02f9'
+ticket: 'HEYM-1'
 ---
 
 # Tech-Spec: D4 — Real Wake Detection
@@ -43,33 +46,39 @@ baseline_commit: '5eedf93'
 **Always:**
 - Mel + embedding ONNX bytes are bundled at compile time via `include_bytes!("../assets/openwakeword/melspectrogram.onnx")` etc. No runtime fetch.
 - Classifier ONNX loaded at startup from `Settings.wake_model_path`. Init failure is fatal (propagate via existing wake-error path; supervisor exits non-zero, systemd restarts).
-- Preserve the `WakeDetector` trait seam and the `feature = "real-wake"` gate. Default build still uses `StubWakeDetector`.
-- All inference runs in a single tokio task spawned by `OwwDetector::start`, consuming `mpsc::Receiver<AudioFrame>` and producing `mpsc::Sender<WakeEvent>`. No new async surface.
+- Preserve the `WakeDetector` abstraction and the `feature = "real-wake"` gate. Its output channel carries `Result<WakeEvent, WakeDetectorError>` so fatal initialization failures reach the supervisor. Default builds still use `StubWakeDetector`.
+- `WakeEvent` carries the averaged classifier score used for the detection decision. `run_supervisor` logs that score and returns an error for detector failures or unexpected detector-channel closure.
+- All inference runs in a single tokio task spawned by `OwwDetector::start`, consuming `mpsc::Receiver<AudioFrame>` and producing the typed wake-result channel. No additional audio stream or inference task is introduced.
 
-**Ask First:** None (delegated to autopilot per Otto run; only stop on concrete blockers).
+**Ask First:**
+- Resolve the architecture conflict with the project-level rule forbidding ML inference on the Pi before cross-compiling or deploying this implementation.
 
 **Never:**
 - Do NOT add oww-rs back as a dep. Drop it from Cargo.toml.
 - Do NOT spawn additional cpal streams; we consume frames from the existing `AudioSource`.
-- Do NOT change the wire contract, `Settings`, or any other module.
+- Do NOT change the gateway wire contract or `Settings`.
+- Changes outside `src/wake.rs` are limited to `src/main.rs` wake-result integration, tests, the wake fixture, and the documented deployment feature flag.
 
 ## Code Map
 
 - `heyma-satellite/Cargo.toml` — drop `oww-rs`, add direct deps `tract-onnx = "0.22"` (with default features) and `ndarray = "0.16"` for tensor manipulation. Replace `[features] real-wake = ["oww-rs"]` with `real-wake = ["dep:tract-onnx", "dep:ndarray"]`.
 - `heyma-satellite/assets/openwakeword/{melspectrogram,embedding_model,alexa}.onnx` — staged binary assets.
 - `heyma-satellite/src/wake.rs` — rewritten `OwwDetector` against `tract-onnx`. Stub kept untouched.
+- `heyma-satellite/src/main.rs` — consume typed detector results, fail the supervisor on detector failure, and log the averaged wake score.
 - `heyma-satellite/tests/wake.rs` — add `test_real_detector_loads_models` (gated `#[cfg(feature = "real-wake")]`) and a positive-detection test using a real WAV fixture.
-- `heyma-satellite/tests/fixtures/alexa.wav` — short WAV containing "alexa" speech (sourced from oww-rs's test fixtures if available, else recorded ad hoc).
+- `heyma-satellite/tests/smoke.rs` — verify fatal detector errors and unexpected detector-channel closure stop the supervisor.
+- `heyma-satellite/tests/fixtures/alexa.wav` — short WAV containing "alexa" speech, copied byte-for-byte from the vendored `deps/wyoming-openwakeword/tests/alexa.wav` fixture.
 
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `Cargo.toml` — Drop `oww-rs`, add `tract-onnx` + `ndarray`, update feature gate.
-- [ ] `src/wake.rs` — Implement the 3-stage pipeline + buffer logic + detection rule with the same trait surface.
-- [ ] `tests/wake.rs` — Add real-wake-gated tests covering: model load, mel-only smoke, full pipeline on known wake WAV, no false-positive on silence.
-- [ ] Verify `cargo test` passes with both default features and `--features real-wake`.
+- [x] `Cargo.toml` — Drop `oww-rs`, add `tract-onnx` + `ndarray`, update feature gate.
+- [x] `src/wake.rs` — Implement the 3-stage pipeline, buffer logic, detection rule, and typed fatal-error result channel.
+- [x] `tests/wake.rs` — Add real-wake-gated tests covering: model load, mel-only smoke, full pipeline on known wake WAV, no false-positive on silence.
+- [x] Verify `cargo test` passes with both default features and `--features real-wake`.
 - [ ] Verify `cross build --release --target aarch64-unknown-linux-gnu --features real-wake` produces a binary.
-- [ ] Re-enable `--features real-wake` in `satellite/scripts/deploy.sh`.
+- [ ] Verify the cross-compiled aarch64 binary is under 10 MB.
+- [x] Re-enable `--features real-wake` in `satellite/scripts/deploy.sh`.
 - [ ] Deploy to `tonny.local` with stock `alexa.onnx`; verify saying "alexa" fires `wake_detected` in journalctl.
 
 **Acceptance Criteria:**
@@ -85,6 +94,15 @@ The oww-rs source was the reference. The implementation should follow its pipeli
 - The mel buffer's 16 slots × 5 mel-time-frames = 80 mel frames, sliced [4:80] to get the 76-frame input the embedding model expects.
 - The embedding output's `[1, 1, 1, 96]` shape needs to be flattened to `[96]` before pushing into the embedding buffer; the classifier expects `[1, 16, 96]`.
 - Single-frame raw scores below 0.1 reset the trailing-edge detection state, preventing the "wake fires repeatedly while user is still talking" failure mode.
+- Eight consecutive model-runtime errors or invalid classifier scores are fatal so the service cannot appear healthy while silently discarding every frame.
+- The original prohibition on changing other modules conflicted with the acceptance criteria requiring fatal initialization propagation and a scored `wake_detected` event. The implementation resolves this in favor of the user-facing criteria: `WakeDetector` emits typed `Result` values, `WakeEvent` carries the averaged classifier score, and `run_supervisor` returns an error on detector failure or unexpected channel closure. The default build still selects `StubWakeDetector`, preserving the push-to-talk rollback path.
+- Local verification on 2026-09-08: default tests passed (48), `--features real-wake` tests passed (54, zero ignored), and the native release build passed. The required aarch64 cross-build remains unchecked because `cross` and the `aarch64-unknown-linux-gnu` Rust target are unavailable locally. Deployment was intentionally not run during local implementation.
+- BMAD review classified the spec as `bad-spec`: the project-level agent guide says never to run ML inference on the Pi, while D4 explicitly requires the three ONNX stages to execute there. The already-working local implementation and tests are retained as KEEP artifacts, but cross-build and deployment are blocked until that architecture rule is explicitly amended or the wake architecture moves inference off-device.
+
+## Spec Change Log
+
+- 2026-09-08, review iteration 1: Acceptance review found that fatal initialization and scored wake-event criteria were impossible under the original unchanged-trait and unchanged-module boundaries. Amended the boundaries and Code Map to authorize the typed result channel, scored `WakeEvent`, and minimal `src/main.rs` integration. Avoid the known-bad state where initialization failure merely closes a channel and the supervisor exits successfully. KEEP the passing model pipeline, default stub feature gate, real Alexa fixture, and supervisor integration tests.
+- 2026-09-08, review iteration 1 blocker: Acceptance review found that on-device tract inference conflicts with the project-level prohibition on Pi ML inference. No deployment-side amendment was inferred. KEEP all local evidence and leave cross-build, target-size, live wake, live silence, and restart behavior unclaimed until the architecture decision is explicit.
 
 ## Verification
 

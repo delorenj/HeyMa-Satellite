@@ -93,7 +93,6 @@ pub async fn run_supervisor(
 
     loop {
         tokio::select! {
-            biased;
 
             // ---- Shutdown signal ----
             _ = &mut shutdown => {
@@ -293,11 +292,18 @@ pub async fn run_supervisor(
             }
 
             // ---- Wake event ----
-            wake_ev = wake_rx.recv() => {
-                if wake_ev.is_none() {
-                    warn!(event = "wake_detector_channel_closed");
-                    break;
-                }
+            wake_result = wake_rx.recv() => {
+                let wake_ev = match wake_result {
+                    Some(Ok(event)) => event,
+                    Some(Err(error)) => {
+                        error!(event = "wake_detector_failed", error = %error);
+                        return Err(error.into());
+                    }
+                    None => {
+                        error!(event = "wake_detector_channel_closed");
+                        return Err(anyhow::anyhow!("wake detector channel closed unexpectedly"));
+                    }
+                };
 
                 if active_session.is_none() {
                     let session_id = Uuid::new_v4().to_string();
@@ -305,6 +311,7 @@ pub async fn run_supervisor(
                         event = "wake_detected",
                         session_id = %session_id,
                         gateway_url = %settings.gateway_url,
+                        score = wake_ev.score,
                     );
 
                     active_session = Some(session_id.clone());
