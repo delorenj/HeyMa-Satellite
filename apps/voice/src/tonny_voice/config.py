@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     # House control. Off by default so a gateway with no DeLoHome behind it behaves
     # exactly as before; the Pi never talks to this, only the gateway does.
     home_enabled: bool = True
-    home_url: str = "http://127.0.0.1:8091/mcp"
+    home_url: str = "http://127.0.0.1:8092/mcp"  # 8091 is gluetun on big-chungus
     home_timeout_seconds: float = Field(default=20, gt=0, le=60)
     wake_model_path: Path = ASSET_DIR / "hey_tonny.onnx"
     wake_melspec_model_path: Path = ASSET_DIR / "melspectrogram.onnx"
