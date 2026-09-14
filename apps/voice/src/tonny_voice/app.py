@@ -282,6 +282,19 @@ def create_app(
     }
     app.state.last_error = None
 
+    @app.on_event("startup")
+    async def _warm_home() -> None:
+        """Load DeLoHome once, here, not on the first utterance.
+
+        Costs ~1.75 s (import plus registry build plus credential resolution) and is
+        paid exactly once. Doing it lazily would put that entire delay in front of
+        whichever unlucky request arrived first.
+        """
+        home = getattr(voice, "home", None)
+        if home is None or not cfg.home_enabled:
+            return
+        app.state.home_ready = await home.warm()
+
     @app.get("/healthz")
     async def health():
         return {
@@ -292,6 +305,10 @@ def create_app(
             "revision": cfg.revision or cfg.commit,
             "configured": cfg.configured,
             "active_session": app.state.active,
+            "home_control": {
+                "ready": getattr(app.state, "home_ready", False),
+                "location": getattr(getattr(voice, "home", None), "location", None),
+            },
             "pipeline": (
                 "pcm -> wav-loopback"
                 if cfg.mode == "loopback"

@@ -5,6 +5,11 @@ description = "Pipecat and Cartesia Line gateway for the Tonny audio satellite"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "pipecat-ai[deepgram,cartesia,websocket]==1.7.0",
+  # NOTE: DeLoHome is deliberately NOT a dependency. Its tree and this one cannot be
+  # reconciled — cartesia-line pins websockets>=13,<14 while delohome -> fastmcp 2.14.4
+  # needs >=15.0.1. The gateway reaches it over its MCP HTTP endpoint with httpx
+  # instead, which costs nothing (262 ms per call either way — that is the Hue bridge's
+  # own round trip) and keeps the two projects' dependencies independent.
   "cartesia-line==0.2.17",
   "fastapi>=0.115,<1",
   "openwakeword==0.6.0",
@@ -48,3 +53,4 @@ select = ["E", "F", "I", "UP", "B", "ASYNC"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["tonny_voice"]
+

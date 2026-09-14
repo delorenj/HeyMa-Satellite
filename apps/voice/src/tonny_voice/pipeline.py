@@ -35,15 +35,19 @@ from pipecat.services.deepgram.stt import DeepgramSTTService
 from pipecat.workers.runner import WorkerRunner
 
 from tonny_voice.config import Settings
+from tonny_voice.home import HomeControl
 from tonny_voice.loopback import Reply, VoiceError
 
 PROMPT = (
     "You are Tonny, a friendly household voice assistant speaking through a little "
     "Raspberry Pi. Answer naturally in one or two short sentences. Use plain spoken "
     "words, without markdown. Be honest about uncertainty and your limitations. "
-    "You can converse and answer general questions; you have no tools to operate "
-    "devices, browse, or perform actions. Never claim to have performed an action."
+    "Never claim to have performed an action you did not actually perform — if a tool "
+    "reports a failure, say so plainly rather than papering over it."
 )
+"""Base prompt. When house control is available, HomeControl.prompt_fragment() is
+appended describing the real tools; the two are kept separate so the conversational
+persona does not have to be rewritten as the house gains capabilities."""
 
 
 @dataclass
@@ -243,11 +247,16 @@ async def run_pipeline(
 
 
 class VoiceEngine:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, home: HomeControl | None = None):
         self.settings = settings
         self.history: deque[tuple[str, str]] = deque(maxlen=settings.history_turns)
         self.last_turn_at = 0.0
         self.evidence = {"stt_turns": 0, "llm_turns": 0, "tts_turns": 0}
+        # Injected so tests can supply an unwarmed or stub HomeControl; a real one is
+        # warmed once at app startup, never per turn.
+        self.home = home if home is not None else HomeControl(
+            url=settings.home_url, timeout=settings.home_timeout_seconds
+        )
 
     def build_stt(self) -> FrameProcessor:
         cfg = self.settings
@@ -282,9 +291,9 @@ class VoiceEngine:
         return LlmAgent(
             model=model,
             api_key=cfg.llm_api_key.get_secret_value(),
-            tools=[],
+            tools=self.home.tools(),
             config=LlmConfig(
-                system_prompt=PROMPT,
+                system_prompt=PROMPT + self.home.prompt_fragment(),
                 temperature=0.5,
                 max_tokens=250,
                 num_retries=0,
