@@ -26,7 +26,35 @@ use tokio::sync::mpsc;
 pub struct WakeEvent {
     /// Monotonic timestamp (ms since epoch, best-effort).
     pub detected_at_ms: u64,
+    /// Classifier confidence associated with the detection.
+    pub score: f32,
 }
+
+/// Fatal detector failure surfaced to the supervisor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WakeDetectorError {
+    message: String,
+}
+
+impl WakeDetectorError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    fn initialization(error: impl std::fmt::Display) -> Self {
+        Self::new(format!("wake detector initialization failed: {error}"))
+    }
+}
+
+impl std::fmt::Display for WakeDetectorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for WakeDetectorError {}
 
 // ---------------------------------------------------------------------------
 // WakeDetector trait
@@ -37,10 +65,12 @@ pub trait WakeDetector: Send + 'static {
     /// Consume audio frames from `rx`, emit a `WakeEvent` each time the model
     /// scores above the configured threshold. Returns a new channel for wake events.
     ///
-    /// F8: if initialization fails, the implementation must propagate the failure
-    /// via the returned JoinHandle rather than silently returning. The supervisor
-    /// awaits the handle and treats Err as fatal.
-    fn start(self: Box<Self>, rx: mpsc::Receiver<AudioFrame>) -> mpsc::Receiver<WakeEvent>;
+    /// If initialization or sustained inference fails, the implementation must
+    /// send `Err` on the returned channel. The supervisor treats that as fatal.
+    fn start(
+        self: Box<Self>,
+        rx: mpsc::Receiver<AudioFrame>,
+    ) -> mpsc::Receiver<Result<WakeEvent, WakeDetectorError>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -49,7 +79,7 @@ pub trait WakeDetector: Send + 'static {
 
 #[cfg(feature = "real-wake")]
 mod real_wake {
-    use super::{AudioFrame, Settings, WakeDetector, WakeEvent};
+    use super::{AudioFrame, Settings, WakeDetector, WakeDetectorError, WakeEvent};
     use std::collections::VecDeque;
     use std::io::Cursor;
     use std::sync::Arc;
@@ -70,9 +100,13 @@ mod real_wake {
     const DEBOUNCE_MS: u64 = 2_000;
     // Score below this is ignored for moving-average purposes.
     const SCORE_FLOOR: f32 = 0.1;
+    // A damaged model or runtime must not leave the service apparently healthy
+    // while every audio frame is being discarded.
+    const MAX_CONSECUTIVE_INFERENCE_ERRORS: u32 = 8;
 
     // Universal model bytes bundled at compile time.
-    static MEL_MODEL_BYTES: &[u8] = include_bytes!("../assets/openwakeword/melspectrogram.onnx");
+    static MEL_MODEL_BYTES: &[u8] =
+        include_bytes!("../assets/openwakeword/melspectrogram.onnx");
     static EMBEDDING_MODEL_BYTES: &[u8] =
         include_bytes!("../assets/openwakeword/embedding_model.onnx");
 
@@ -107,8 +141,7 @@ mod real_wake {
     }
 
     // Runnable model type alias for clarity.
-    type RunnableOnnx =
-        RunnableModel<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
+    type RunnableOnnx = RunnableModel<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
 
     pub struct OwwDetector {
         settings: Arc<Settings>,
@@ -137,7 +170,9 @@ mod real_wake {
         /// Load and optimize the classifier model from a file path.
         fn load_classifier(path: &std::path::Path) -> Result<RunnableOnnx, WakeInitError> {
             if !path.exists() {
-                return Err(WakeInitError::MissingModel(path.display().to_string()));
+                return Err(WakeInitError::MissingModel(
+                    path.display().to_string(),
+                ));
             }
             let bytes = std::fs::read(path)?;
             let mut rdr = Cursor::new(bytes);
@@ -149,36 +184,44 @@ mod real_wake {
                 .into_runnable()?;
             Ok(model)
         }
+
+        fn load_models(
+            settings: &Settings,
+        ) -> Result<(RunnableOnnx, RunnableOnnx, RunnableOnnx), WakeInitError> {
+            let mel = OwwDetector::load_model_from_bytes(MEL_MODEL_BYTES, &[1, 1280])?;
+            let embedding = OwwDetector::load_model_from_bytes(
+                EMBEDDING_MODEL_BYTES,
+                &[1, 76, 32, 1],
+            )?;
+            let classifier = OwwDetector::load_classifier(&settings.wake_model_path)?;
+            Ok((mel, embedding, classifier))
+        }
     }
 
     impl WakeDetector for OwwDetector {
-        fn start(self: Box<Self>, mut rx: mpsc::Receiver<AudioFrame>) -> mpsc::Receiver<WakeEvent> {
+        fn start(
+            self: Box<Self>,
+            mut rx: mpsc::Receiver<AudioFrame>,
+        ) -> mpsc::Receiver<Result<WakeEvent, WakeDetectorError>> {
             let (tx, wake_rx) = mpsc::channel(4);
             let settings = self.settings.clone();
 
             tokio::spawn(async move {
                 // All model loading happens in the spawned task on a blocking thread
                 // to avoid blocking the async executor during ONNX optimization.
-                let load_result: Result<(RunnableOnnx, RunnableOnnx, RunnableOnnx), WakeInitError> =
-                    tokio::task::spawn_blocking({
-                        let settings = settings.clone();
-                        move || {
-                            let mel =
-                                OwwDetector::load_model_from_bytes(MEL_MODEL_BYTES, &[1, 1280])?;
-                            let emb = OwwDetector::load_model_from_bytes(
-                                EMBEDDING_MODEL_BYTES,
-                                &[1, 76, 32, 1],
-                            )?;
-                            let cls = OwwDetector::load_classifier(&settings.wake_model_path)?;
-                            Ok((mel, emb, cls))
-                        }
-                    })
-                    .await
-                    .unwrap_or_else(|join_err| {
-                        Err(WakeInitError::MissingModel(format!(
-                            "spawn_blocking panicked: {join_err}"
-                        )))
-                    });
+                let load_result: Result<
+                    (RunnableOnnx, RunnableOnnx, RunnableOnnx),
+                    WakeInitError,
+                > = tokio::task::spawn_blocking({
+                    let settings = settings.clone();
+                    move || OwwDetector::load_models(&settings)
+                })
+                .await
+                .unwrap_or_else(|join_err| {
+                    Err(WakeInitError::MissingModel(format!(
+                        "spawn_blocking panicked: {join_err}"
+                    )))
+                });
 
                 let (mel_model, emb_model, cls_model) = match load_result {
                     Ok(models) => models,
@@ -188,6 +231,7 @@ mod real_wake {
                             path = %settings.wake_model_path.display(),
                             error = %e,
                         );
+                        let _ = tx.send(Err(WakeDetectorError::initialization(e))).await;
                         return;
                     }
                 };
@@ -199,20 +243,22 @@ mod real_wake {
 
                 // FIFO ring buffers.
                 // mel_buf: each entry is a flattened [5*32 = 160] f32 array.
-                let mut mel_buf: VecDeque<Vec<f32>> = std::iter::repeat_with(|| vec![0f32; 5 * 32])
-                    .take(MEL_BUFFER_SIZE)
-                    .collect();
+                let mut mel_buf: VecDeque<Vec<f32>> =
+                    std::iter::repeat_with(|| vec![0f32; 5 * 32])
+                        .take(MEL_BUFFER_SIZE)
+                        .collect();
                 // emb_buf: each entry is a flattened [96] f32 array.
-                let mut emb_buf: VecDeque<Vec<f32>> = std::iter::repeat_with(|| vec![0f32; 96])
-                    .take(EMBEDDING_BUFFER_SIZE)
-                    .collect();
+                let mut emb_buf: VecDeque<Vec<f32>> =
+                    std::iter::repeat_with(|| vec![0f32; 96])
+                        .take(EMBEDDING_BUFFER_SIZE)
+                        .collect();
                 // det_buf: ring of raw scores for moving-average detection.
-                let mut det_buf: VecDeque<f32> = std::iter::repeat(0f32)
-                    .take(DETECTION_BUFFER_SIZE)
-                    .collect();
+                let mut det_buf: VecDeque<f32> =
+                    std::iter::repeat(0f32).take(DETECTION_BUFFER_SIZE).collect();
 
-                let mut last_detection = Instant::now() - Duration::from_millis(DEBOUNCE_MS + 1);
-                let mut last_debug_score = Instant::now() - Duration::from_millis(1_001);
+                let mut last_detection = Instant::now()
+                    - Duration::from_millis(DEBOUNCE_MS + 1);
+                let mut consecutive_inference_errors = 0u32;
 
                 while let Some(frame) = rx.recv().await {
                     // Stage 0: i16 -> f32 normalization.
@@ -227,7 +273,20 @@ mod real_wake {
                     let mel_out = match run_mel(&mel_model, &samples_f32) {
                         Ok(v) => v,
                         Err(e) => {
-                            tracing::warn!(event = "mel_inference_error", error = %e);
+                            consecutive_inference_errors += 1;
+                            tracing::warn!(
+                                event = "mel_inference_error",
+                                consecutive_errors = consecutive_inference_errors,
+                                error = %e,
+                            );
+                            if consecutive_inference_errors >= MAX_CONSECUTIVE_INFERENCE_ERRORS {
+                                let _ = tx
+                                    .send(Err(WakeDetectorError::new(
+                                        "wake mel inference failed repeatedly",
+                                    )))
+                                    .await;
+                                return;
+                            }
                             continue;
                         }
                     };
@@ -241,7 +300,20 @@ mod real_wake {
                     let emb_out = match run_embedding(&emb_model, &mel_buf) {
                         Ok(v) => v,
                         Err(e) => {
-                            tracing::warn!(event = "emb_inference_error", error = %e);
+                            consecutive_inference_errors += 1;
+                            tracing::warn!(
+                                event = "emb_inference_error",
+                                consecutive_errors = consecutive_inference_errors,
+                                error = %e,
+                            );
+                            if consecutive_inference_errors >= MAX_CONSECUTIVE_INFERENCE_ERRORS {
+                                let _ = tx
+                                    .send(Err(WakeDetectorError::new(
+                                        "wake embedding inference failed repeatedly",
+                                    )))
+                                    .await;
+                                return;
+                            }
                             continue;
                         }
                     };
@@ -254,10 +326,42 @@ mod real_wake {
                     let score = match run_classifier(&cls_model, &emb_buf) {
                         Ok(s) => s,
                         Err(e) => {
-                            tracing::warn!(event = "cls_inference_error", error = %e);
+                            consecutive_inference_errors += 1;
+                            tracing::warn!(
+                                event = "cls_inference_error",
+                                consecutive_errors = consecutive_inference_errors,
+                                error = %e,
+                            );
+                            if consecutive_inference_errors >= MAX_CONSECUTIVE_INFERENCE_ERRORS {
+                                let _ = tx
+                                    .send(Err(WakeDetectorError::new(
+                                        "wake classifier inference failed repeatedly",
+                                    )))
+                                    .await;
+                                return;
+                            }
                             continue;
                         }
                     };
+                    if !score.is_finite() || !(0.0..=1.0).contains(&score) {
+                        consecutive_inference_errors += 1;
+                        tracing::warn!(
+                            event = "cls_invalid_score",
+                            score = score,
+                            consecutive_errors = consecutive_inference_errors,
+                            reason = "classifier score must be finite and within [0, 1]",
+                        );
+                        if consecutive_inference_errors >= MAX_CONSECUTIVE_INFERENCE_ERRORS {
+                            let _ = tx
+                                .send(Err(WakeDetectorError::new(
+                                    "wake classifier returned invalid scores repeatedly",
+                                )))
+                                .await;
+                            return;
+                        }
+                        continue;
+                    }
+                    consecutive_inference_errors = 0;
 
                     // Push raw score to detection buffer.
                     det_buf.pop_front();
@@ -267,27 +371,11 @@ mod real_wake {
                     let avg = calculate_average(&det_buf);
                     let since_last_ms = last_detection.elapsed().as_millis() as u64;
 
-                    if settings.wake_debug_scores
-                        && last_debug_score.elapsed() >= Duration::from_millis(1_000)
-                    {
-                        last_debug_score = Instant::now();
-                        tracing::info!(
-                            event = "wake_score_debug",
-                            score = score,
-                            average = avg,
-                            threshold = settings.wake_threshold,
-                            positive_count = count_positive_scores(&det_buf),
-                        );
-                    }
-
-                    if score < SCORE_FLOOR
-                        && avg > settings.wake_threshold
-                        && since_last_ms > DEBOUNCE_MS
-                    {
+                    if should_trigger(score, avg, settings.wake_threshold, since_last_ms) {
                         last_detection = Instant::now();
                         tracing::info!(
                             event = "wake_score_above_threshold",
-                            score = score,
+                            score = avg,
                             threshold = settings.wake_threshold,
                         );
                         let now_ms = std::time::SystemTime::now()
@@ -295,9 +383,10 @@ mod real_wake {
                             .unwrap_or_default()
                             .as_millis() as u64;
                         if tx
-                            .send(WakeEvent {
+                            .send(Ok(WakeEvent {
                                 detected_at_ms: now_ms,
-                            })
+                                score: avg,
+                            }))
                             .await
                             .is_err()
                         {
@@ -318,7 +407,10 @@ mod real_wake {
     /// Run mel-spectrogram inference.
     /// Input: 1280 f32 samples. Output: 160 f32 values representing [5, 32].
     /// Applies oww-rs normalization: v = v / 10.0 + 2.0.
-    fn run_mel(model: &RunnableOnnx, samples: &[f32]) -> Result<Vec<f32>, TractError> {
+    fn run_mel(
+        model: &RunnableOnnx,
+        samples: &[f32],
+    ) -> Result<Vec<f32>, TractError> {
         let input = Tensor::from_shape(&[1, 1280], samples)?;
         let outputs = model.run(tvec!(input.into()))?;
         let out_tensor = outputs[0].clone().into_tensor();
@@ -328,6 +420,17 @@ mod real_wake {
         // Apply oww-rs normalization: v / 10.0 + 2.0.
         let normalized: Vec<f32> = arr.iter().map(|&v| v / 10.0 + 2.0).collect();
         Ok(normalized)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mel_smoke_for_test(samples: &[f32]) -> Result<Vec<f32>, WakeInitError> {
+        let model = OwwDetector::load_model_from_bytes(MEL_MODEL_BYTES, &[1, 1280])?;
+        Ok(run_mel(&model, samples)?)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn models_load_for_test(settings: &Settings) -> Result<(), WakeInitError> {
+        OwwDetector::load_models(settings).map(drop)
     }
 
     /// Run embedding inference.
@@ -413,13 +516,28 @@ mod real_wake {
         }
     }
 
-    fn count_positive_scores(det_buf: &VecDeque<f32>) -> usize {
-        det_buf.iter().filter(|&&score| score > SCORE_FLOOR).count()
+    fn should_trigger(score: f32, average: f32, threshold: f32, since_last_ms: u64) -> bool {
+        score < SCORE_FLOOR
+            && average > threshold
+            && since_last_ms >= DEBOUNCE_MS
     }
+
+    #[cfg(test)]
+    pub(crate) fn should_trigger_for_test(
+        score: f32,
+        average: f32,
+        threshold: f32,
+        since_last_ms: u64,
+    ) -> bool {
+        should_trigger(score, average, threshold, since_last_ms)
+    }
+
 }
 
 #[cfg(feature = "real-wake")]
 pub use real_wake::OwwDetector;
+#[cfg(all(feature = "real-wake", test))]
+pub(crate) use real_wake::{mel_smoke_for_test, models_load_for_test, should_trigger_for_test};
 
 // ---------------------------------------------------------------------------
 // StubWakeDetector -- used in tests and default builds without a model file
@@ -433,7 +551,10 @@ pub const WAKE_SENTINEL: i16 = 0x7E57;
 pub struct StubWakeDetector;
 
 impl WakeDetector for StubWakeDetector {
-    fn start(self: Box<Self>, mut rx: mpsc::Receiver<AudioFrame>) -> mpsc::Receiver<WakeEvent> {
+    fn start(
+        self: Box<Self>,
+        mut rx: mpsc::Receiver<AudioFrame>,
+    ) -> mpsc::Receiver<Result<WakeEvent, WakeDetectorError>> {
         let (tx, wake_rx) = mpsc::channel(4);
 
         tokio::spawn(async move {
@@ -445,9 +566,10 @@ impl WakeDetector for StubWakeDetector {
                         .unwrap_or_default()
                         .as_millis() as u64;
                     if tx
-                        .send(WakeEvent {
+                        .send(Ok(WakeEvent {
                             detected_at_ms: now_ms,
-                        })
+                            score: 1.0,
+                        }))
                         .await
                         .is_err()
                     {

@@ -187,6 +187,13 @@ def activate(release: Path, revision: str) -> None:
                 raise ValueError("Gateway credentials are not configured")
             if current.get("commit", current.get("revision")) != revision:
                 raise ValueError("Gateway has not loaded this revision yet")
+            wake = current.get("wake", {})
+            if not wake.get("loaded") or wake.get("model") != "hey_tonny":
+                raise ValueError("Gateway wake detector is not loaded")
+            if wake.get("sha256") != (
+                "558bd199797084e41f6e1e9fd3cd330fb9920af5d55e06d2c647659bab33a5a0"
+            ):
+                raise ValueError("Gateway wake model checksum is not the approved artifact")
             print(json.dumps(current, sort_keys=True))
             break
         except (OSError, ValueError):
@@ -230,8 +237,27 @@ sudo -n systemctl daemon-reload
 sudo -n systemctl disable --now heyma.service
 sudo -n systemctl enable tonny-satellite.service
 sudo -n systemctl restart tonny-satellite.service
-sleep 2
+ready_invocation=''
+for attempt in $(seq 1 15); do
+    sudo -n systemctl is-active --quiet tonny-satellite.service
+    invocation=$(sudo -n systemctl show --value -p InvocationID tonny-satellite.service)
+    if sudo -n journalctl _SYSTEMD_INVOCATION_ID="$invocation" -o cat --no-pager | grep -Fq '"stage":"ready","mode":"hands_free"'; then
+        ready_invocation=$invocation
+        break
+    fi
+    sleep 1
+done
+test -n "$ready_invocation"
+sleep 5
 sudo -n systemctl is-active --quiet tonny-satellite.service
+test "$(sudo -n systemctl show --value -p InvocationID tonny-satellite.service)" = "$ready_invocation"
+logs=$(sudo -n journalctl _SYSTEMD_INVOCATION_ID="$ready_invocation" -o cat --no-pager)
+grep -Fq '"stage":"connected"' <<<"$logs"
+if grep -Fq '"stage":"error"' <<<"$logs"; then
+    exit 1
+fi
+main_pid=$(sudo -n systemctl show --value -p MainPID tonny-satellite.service)
+pgrep -P "$main_pid" -x arecord >/dev/null
 """
     try:
         print(remote(script, timeout=300))
@@ -255,12 +281,49 @@ def status() -> None:
 
 
 def talk() -> None:
-    remote(
-        "sudo -n systemctl kill --kill-whom=main --signal=SIGUSR1 tonny-satellite.service\n",
-        timeout=15,
+    print(
+        "Tonny is about to record for 6 seconds. Speak now; hands-free mode resumes afterward.",
+        flush=True,
     )
     print(
-        "Tonny is recording for 6 seconds. Speak now; the reply will play on its speaker."
+        remote(
+            """set -euo pipefail
+release=$(sudo -n systemctl show --value -p WorkingDirectory tonny-satellite.service)
+test -x "$release/venv/bin/python"
+resume() { sudo -n systemctl restart tonny-satellite.service; }
+trap resume EXIT INT TERM
+sudo -n systemctl stop tonny-satellite.service
+sleep 1
+"$release/venv/bin/python" "$release/apps/satellite/satellite.py" \\
+    --url ws://big-chungus.local:18778/v1/voice --capture-seconds 6 \\
+    --connect-timeout 15 --response-timeout 60 --once
+sudo -n systemctl start tonny-satellite.service
+ready_invocation=''
+for attempt in $(seq 1 15); do
+    sudo -n systemctl is-active --quiet tonny-satellite.service
+    invocation=$(sudo -n systemctl show --value -p InvocationID tonny-satellite.service)
+    if sudo -n journalctl _SYSTEMD_INVOCATION_ID="$invocation" -o cat --no-pager | grep -Fq '"stage":"ready","mode":"hands_free"'; then
+        ready_invocation=$invocation
+        break
+    fi
+    sleep 1
+done
+test -n "$ready_invocation"
+sleep 5
+sudo -n systemctl is-active --quiet tonny-satellite.service
+test "$(sudo -n systemctl show --value -p InvocationID tonny-satellite.service)" = "$ready_invocation"
+logs=$(sudo -n journalctl _SYSTEMD_INVOCATION_ID="$ready_invocation" -o cat --no-pager)
+grep -Fq '"stage":"connected"' <<<"$logs"
+if grep -Fq '"stage":"error"' <<<"$logs"; then
+    exit 1
+fi
+main_pid=$(sudo -n systemctl show --value -p MainPID tonny-satellite.service)
+pgrep -P "$main_pid" -x arecord >/dev/null
+trap - EXIT INT TERM
+""",
+            timeout=240,
+        ),
+        end="",
     )
 
 

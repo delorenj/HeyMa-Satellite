@@ -97,17 +97,42 @@ class AudioValidationTests(unittest.TestCase):
         self.assertTrue(options.no_playback)
         self.assertFalse(sat.parse_options([]).no_playback)
 
+    def test_hands_free_is_explicit_and_rejects_file_capture(self):
+        self.assertFalse(sat.parse_options([]).hands_free)
+        self.assertTrue(sat.parse_options(["--hands-free"]).hands_free)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            sat.parse_options(["--hands-free", "--once", "--input-wav", "/tmp/input.wav"])
+
 
 class WireTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.server = None
         self.received = []
         self.connections = 0
+        self.processes = []
+        self.real_spawn = asyncio.create_subprocess_exec
 
     async def asyncTearDown(self):
         if self.server is not None:
             self.server.close()
             await self.server.wait_closed()
+        for process in self.processes:
+            await sat.terminate_process(process)
+
+    def fake_live_capture(self):
+        script = (
+            "import sys,time\n"
+            "chunk=b'\\x01\\x00'*1280\n"
+            "while True:\n"
+            " sys.stdout.buffer.write(chunk); sys.stdout.buffer.flush(); time.sleep(0.002)\n"
+        )
+
+        async def spawn(*args, **kwargs):
+            process = await self.real_spawn(sys.executable, "-c", script, **kwargs)
+            self.processes.append(process)
+            return process
+
+        return spawn
 
     async def start_server(self, handler):
         self.server = await serve(handler, "127.0.0.1", 0, compression=None, close_timeout=0.1)
@@ -148,6 +173,57 @@ class WireTests(unittest.IsolatedAsyncioTestCase):
         chunks = [value for value in self.received if isinstance(value, bytes)]
         self.assertEqual(b"".join(chunks), pcm)
         self.assertTrue(all(0 < len(chunk) <= 2560 and len(chunk) % 2 == 0 for chunk in chunks))
+
+    async def test_continuous_wire_streams_after_ready_and_stops_capture_for_reply(self):
+        async def hands_free(websocket):
+            self.connections += 1
+            hello = json.loads(await websocket.recv())
+            self.received.append(hello)
+            self.assertEqual(hello["mode"], "continuous")
+            await websocket.send(json.dumps({"type": "ready", "session_id": hello["session_id"]}))
+            pcm = await websocket.recv()
+            self.received.append(pcm)
+            await websocket.send(
+                json.dumps({"type": "wake_detected", "model": "hey_tonny", "score": 0.8})
+            )
+            await websocket.recv()
+            await websocket.send(json.dumps({"type": "response_start", "format": "wav"}))
+            await websocket.send(wav_bytes(rate=24_000))
+            await websocket.send(json.dumps({"type": "response_end"}))
+
+        options = await self.start_server(hands_free)
+        with patch.object(sat.asyncio, "create_subprocess_exec", self.fake_live_capture()):
+            result = await sat.continuous_exchange(options, "continuous-session")
+        self.assertEqual(result, wav_bytes(rate=24_000))
+        self.assertEqual(self.connections, 1)
+        self.assertEqual(len(self.received[1]), sat.FRAME_BYTES)
+        self.assertIsNotNone(self.processes[0].returncode)
+
+    async def test_continuous_disconnect_after_pcm_is_not_replayed(self):
+        async def disconnect(websocket):
+            self.connections += 1
+            hello = json.loads(await websocket.recv())
+            await websocket.send(json.dumps({"type": "ready", "session_id": hello["session_id"]}))
+            await websocket.recv()
+            await websocket.close()
+
+        options = await self.start_server(disconnect)
+        with patch.object(sat.asyncio, "create_subprocess_exec", self.fake_live_capture()):
+            with self.assertRaisesRegex(
+                sat.ClientError, "continuous_session_lost_after_submission"
+            ):
+                await sat.continuous_exchange(options, "continuous-session")
+        self.assertEqual(self.connections, 1)
+
+    async def test_hands_free_turn_plays_once_then_returns(self):
+        options = sat.Options(hands_free=True)
+        reply = wav_bytes(rate=24_000)
+        with (
+            patch.object(sat, "continuous_exchange", new_callable=AsyncMock, return_value=reply),
+            patch.object(sat, "play_audio", new_callable=AsyncMock) as playback,
+        ):
+            await sat.run_hands_free_turn(options, "session")
+        playback.assert_awaited_once_with(options, reply)
 
     async def test_input_wav_uses_wire_path_saves_reply_and_still_plays(self):
         options = await self.start_server(self.normal_response)
