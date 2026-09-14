@@ -8,7 +8,9 @@ mod config;
 mod utterance;
 
 use audio::AudioFrame;
-use utterance::{compute_rms, make_utterance_detector, rms_to_dbfs, UtteranceDetector, UtteranceState};
+use utterance::{
+    compute_rms, make_utterance_detector, rms_to_dbfs, UtteranceDetector, UtteranceState,
+};
 
 const SAMPLE_RATE: u32 = 16_000;
 const FRAME_SAMPLES: usize = 1280; // 80 ms at 16 kHz
@@ -161,7 +163,10 @@ fn test_signal_resets_silence_streak() {
     assert_eq!(det.push_frame(&silent_frame()), UtteranceState::Listening); // streak=160
 
     // Frame 3: loud signal resets streak.
-    assert_eq!(det.push_frame(&sine_frame(10_000)), UtteranceState::Listening); // streak=0
+    assert_eq!(
+        det.push_frame(&sine_frame(10_000)),
+        UtteranceState::Listening
+    ); // streak=0
 
     // Frames 4-5: silence rebuilding streak (still < hold=240).
     assert_eq!(det.push_frame(&silent_frame()), UtteranceState::Listening); // streak=80

@@ -4,7 +4,6 @@ use crate::audio::AudioFrame;
 // End-of-utterance detection
 // ---------------------------------------------------------------------------
 
-
 /// Per-utterance state, driven by `UtteranceDetector::push_frame`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum UtteranceState {

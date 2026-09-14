@@ -3,6 +3,8 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use hound;
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -122,6 +124,15 @@ impl AudioSource for CpalAudioSource {
                     .default_input_device()
                     .context("no default input device")?,
             };
+            let selected_name = device
+                .name()
+                .unwrap_or_else(|err| format!("<unknown: {err}>"));
+            tracing::info!(
+                event = "audio_input_device_selected",
+                requested = settings.mic_device.as_deref().unwrap_or("<default>"),
+                device = selected_name,
+                sample_rate = sample_rate,
+            );
 
             let config = cpal::StreamConfig {
                 channels: 1,
@@ -142,8 +153,7 @@ impl AudioSource for CpalAudioSource {
                     move |data: &[i16], _| {
                         accumulator.extend_from_slice(data);
                         while accumulator.len() >= frame_samples {
-                            let frame_data: Vec<i16> =
-                                accumulator.drain(..frame_samples).collect();
+                            let frame_data: Vec<i16> = accumulator.drain(..frame_samples).collect();
                             let frame = AudioFrame::from_samples(&frame_data);
                             // F4: use try_send (realtime-safe); dropped frames are
                             // counted and logged by the supervisor (F3).
@@ -201,6 +211,21 @@ impl AudioSink for CpalAudioSink {
     fn play_wav(&mut self, wav_bytes: Bytes) -> Result<()> {
         use std::io::Cursor;
 
+        if let Some(command) = self
+            .settings
+            .speaker_command
+            .as_deref()
+            .map(str::trim)
+            .filter(|command| !command.is_empty())
+        {
+            tracing::info!(
+                event = "audio_output_command_selected",
+                command = command,
+                bytes = wav_bytes.len(),
+            );
+            return play_wav_with_command(command, wav_bytes);
+        }
+
         let host = cpal::default_host();
 
         let device = match &self.settings.speaker_device {
@@ -213,15 +238,35 @@ impl AudioSink for CpalAudioSink {
                 .default_output_device()
                 .context("no default output device")?,
         };
+        let selected_name = device
+            .name()
+            .unwrap_or_else(|err| format!("<unknown: {err}>"));
 
         // Parse WAV header to extract playback parameters.
         let cursor = Cursor::new(wav_bytes.as_ref());
         let mut reader = hound::WavReader::new(cursor).context("parse WAV")?;
         let spec = reader.spec();
+        tracing::info!(
+            event = "audio_output_device_selected",
+            requested = self
+                .settings
+                .speaker_device
+                .as_deref()
+                .unwrap_or("<default>"),
+            device = selected_name,
+            channels = spec.channels,
+            sample_rate = spec.sample_rate,
+            samples = reader.duration(),
+        );
         let samples: Vec<i16> = reader
             .samples::<i16>()
             .collect::<std::result::Result<_, _>>()
             .context("decode WAV samples")?;
+        let playback_duration = {
+            let channels = usize::from(spec.channels).max(1);
+            let frames = samples.len() / channels;
+            std::time::Duration::from_secs_f64(frames as f64 / spec.sample_rate.max(1) as f64)
+        };
 
         let config = cpal::StreamConfig {
             channels: spec.channels,
@@ -262,11 +307,20 @@ impl AudioSink for CpalAudioSink {
             .context("build_output_stream")?;
 
         stream.play().context("start output stream")?;
+        let playback_started = std::time::Instant::now();
 
         // F5: spin-wait with a 30 s ceiling to prevent infinite blocking.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             if done.load(Ordering::Relaxed) {
+                // CPAL's callback has queued the final samples, but the ALSA device
+                // may not have drained them yet. Short cues can disappear if we drop
+                // the stream immediately after the last buffer is filled.
+                let drain_wait = playback_duration.saturating_sub(playback_started.elapsed())
+                    + std::time::Duration::from_millis(150);
+                if !drain_wait.is_zero() {
+                    std::thread::sleep(drain_wait);
+                }
                 break;
             }
             if std::time::Instant::now() >= deadline {
@@ -279,5 +333,55 @@ impl AudioSink for CpalAudioSink {
         // Drop stream explicitly to release the device.
         drop(stream);
         Ok(())
+    }
+}
+
+fn play_wav_with_command(command: &str, wav_bytes: Bytes) -> Result<()> {
+    use std::io::Read;
+
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("spawn speaker command: {command}"))?;
+
+    {
+        let mut stdin = child.stdin.take().context("open speaker command stdin")?;
+        stdin
+            .write_all(wav_bytes.as_ref())
+            .context("write WAV to speaker command stdin")?;
+    }
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match child.try_wait().context("poll speaker command")? {
+            Some(status) => {
+                let mut stderr = String::new();
+                if let Some(mut err) = child.stderr.take() {
+                    let _ = err.read_to_string(&mut stderr);
+                }
+                if !status.success() {
+                    return Err(anyhow::anyhow!(
+                        "speaker command exited with {}: {}",
+                        status,
+                        stderr.trim()
+                    ));
+                }
+                return Ok(());
+            }
+            None => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    tracing::warn!(event = "speaker_command_timeout");
+                    return Err(anyhow::anyhow!(
+                        "speaker command timed out after 30 seconds"
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
     }
 }

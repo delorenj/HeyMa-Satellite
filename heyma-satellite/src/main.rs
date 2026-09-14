@@ -10,8 +10,10 @@ use crate::gateway::{GatewayFactory, TungsteniteGateway};
 use crate::utterance::{make_utterance_detector, UtteranceState};
 use crate::wake::{make_detector, WakeDetector};
 use anyhow::Result;
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::f32::consts::PI;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info, warn};
@@ -26,6 +28,7 @@ use uuid::Uuid;
 // peak 266 across a full ten seconds of speech: clearly distinguishable.
 const AUDIO_WINDOW: Duration = Duration::from_secs(10);
 const AUDIO_SILENCE_RMS: f64 = 50.0;
+const FRAME_MS: u64 = 80;
 
 // ---------------------------------------------------------------------------
 // Supervisor
@@ -42,6 +45,7 @@ pub async fn run_supervisor(
     mut sink: Box<dyn AudioSink>,
     detector: Box<dyn WakeDetector>,
     gateway_factory: GatewayFactory,
+    mut manual_wake_rx: mpsc::Receiver<()>,
     mut shutdown: oneshot::Receiver<()>,
 ) -> Result<()> {
     info!(
@@ -90,6 +94,10 @@ pub async fn run_supervisor(
     let mut audio_window_sumsq: f64 = 0.0;
     let mut audio_window_samples: u64 = 0;
     let mut audio_window_peak: u32 = 0;
+    let mut manual_wake_enabled = true;
+    let preroll_max_frames =
+        ((settings.wake_preroll_ms.saturating_add(FRAME_MS - 1)) / FRAME_MS).max(1) as usize;
+    let mut preroll_frames: VecDeque<AudioFrame> = VecDeque::with_capacity(preroll_max_frames);
 
     loop {
         tokio::select! {
@@ -235,6 +243,13 @@ pub async fn run_supervisor(
                     audio_window_peak = 0;
                 }
 
+                // Keep recent audio so wake-triggered utterances include speech
+                // that happened while the detector waited for the wake trailing edge.
+                if preroll_frames.len() == preroll_max_frames {
+                    preroll_frames.pop_front();
+                }
+                preroll_frames.push_back(frame.clone());
+
                 // Always feed the wake detector.
                 // F3: log dropped frames (rate-limited to every 1000 drops).
                 if wake_tx.try_send(frame.clone()).is_err() {
@@ -307,12 +322,15 @@ pub async fn run_supervisor(
                         gateway_url = %settings.gateway_url,
                     );
 
+                    play_wake_ding(&session_id, &settings, sink.as_mut());
+
                     active_session = Some(session_id.clone());
                     utt_detector.reset();
                     stream_start = Some(std::time::Instant::now());
 
                     // Open the utterance channel.
                     let (utx, urx) = mpsc::channel::<AudioFrame>(256);
+                    send_preroll(&session_id, &settings, &utx, &preroll_frames);
                     utt_tx = Some(utx);
 
                     // Channel for WAV bytes back from the gateway task.
@@ -340,11 +358,138 @@ pub async fn run_supervisor(
                     tracing::debug!(event = "wake_debounced");
                 }
             }
+
+            // ---- Operator/test wake event ----
+            manual_wake = manual_wake_rx.recv(), if manual_wake_enabled => {
+                if manual_wake.is_none() {
+                    manual_wake_enabled = false;
+                    continue;
+                }
+
+                if active_session.is_none() {
+                    let session_id = Uuid::new_v4().to_string();
+                    info!(
+                        event = "manual_wake_requested",
+                        session_id = %session_id,
+                        gateway_url = %settings.gateway_url,
+                    );
+
+                    play_wake_ding(&session_id, &settings, sink.as_mut());
+
+                    active_session = Some(session_id.clone());
+                    utt_detector.reset();
+                    stream_start = Some(std::time::Instant::now());
+
+                    let (utx, urx) = mpsc::channel::<AudioFrame>(256);
+                    send_preroll(&session_id, &settings, &utx, &preroll_frames);
+                    utt_tx = Some(utx);
+
+                    let (wtx, wrx) = mpsc::channel::<anyhow::Result<bytes::Bytes>>(1);
+                    wav_rx = Some(wrx);
+
+                    let factory = gateway_factory.clone();
+                    let sid = session_id.clone();
+                    let sample_rate = settings.sample_rate;
+                    let mut urx_owned = urx;
+
+                    let handle = tokio::spawn(async move {
+                        let mut client = (factory)();
+                        let mut collecting = WavCollectingSink { buf: Vec::new() };
+                        let result = client
+                            .send_utterance(&sid, sample_rate, &mut urx_owned, &mut collecting)
+                            .await;
+                        let wav_result = result.map(|_| bytes::Bytes::from(collecting.buf));
+                        let _ = wtx.send(wav_result).await;
+                    });
+                    utt_handle = Some(handle);
+                } else {
+                    tracing::debug!(event = "manual_wake_debounced");
+                }
+            }
         }
     }
 
     info!(event = "supervisor_stopped");
     Ok(())
+}
+
+fn send_preroll(
+    session_id: &str,
+    settings: &Settings,
+    tx: &mpsc::Sender<AudioFrame>,
+    frames: &VecDeque<AudioFrame>,
+) {
+    let mut sent = 0usize;
+    for frame in frames.iter().cloned() {
+        if tx.try_send(frame).is_err() {
+            warn!(
+                event = "frame_dropped",
+                channel = "utterance_preroll",
+                session_id = %session_id,
+                dropped_count = 1,
+            );
+            break;
+        }
+        sent += 1;
+    }
+    info!(
+        event = "utterance_preroll_sent",
+        session_id = %session_id,
+        frames = sent,
+        preroll_ms = settings.wake_preroll_ms,
+    );
+}
+
+fn play_wake_ding(session_id: &str, settings: &Settings, sink: &mut dyn AudioSink) {
+    if !settings.wake_ding_enabled {
+        return;
+    }
+
+    info!(
+        event = "wake_ding_playing",
+        session_id = %session_id,
+        frequency_hz = settings.wake_ding_frequency_hz,
+        duration_ms = settings.wake_ding_duration_ms,
+    );
+
+    match build_wake_ding_wav(settings).and_then(|wav| sink.play_wav(wav)) {
+        Ok(()) => info!(event = "wake_ding_played", session_id = %session_id),
+        Err(e) => warn!(event = "wake_ding_failed", session_id = %session_id, error = %e),
+    }
+}
+
+fn build_wake_ding_wav(settings: &Settings) -> Result<bytes::Bytes> {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: settings.sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let sample_count =
+        ((settings.sample_rate as u64 * settings.wake_ding_duration_ms as u64) / 1_000) as usize;
+    let amplitude = (settings.wake_ding_volume.clamp(0.0, 1.0) * i16::MAX as f32) as i16;
+
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    {
+        let mut writer = hound::WavWriter::new(&mut cursor, spec)?;
+        for i in 0..sample_count {
+            let t = i as f32 / settings.sample_rate as f32;
+            let envelope = if sample_count <= 1 {
+                1.0
+            } else {
+                // Smooth click-free attack/release without dragging the cue out.
+                (PI * i as f32 / (sample_count - 1) as f32).sin()
+            };
+            let sample = (amplitude as f32
+                * envelope
+                * (2.0 * PI * settings.wake_ding_frequency_hz as f32 * t).sin())
+                as i16;
+            writer.write_sample(sample)?;
+        }
+        writer.finalize()?;
+    }
+
+    Ok(bytes::Bytes::from(cursor.into_inner()))
 }
 
 // ---------------------------------------------------------------------------
@@ -405,6 +550,7 @@ async fn main() -> Result<()> {
     });
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let (manual_wake_tx, manual_wake_rx) = mpsc::channel::<()>(4);
 
     // F22: handle both SIGTERM and SIGINT.
     tokio::spawn(async move {
@@ -422,5 +568,24 @@ async fn main() -> Result<()> {
         let _ = shutdown_tx.send(());
     });
 
-    run_supervisor(settings, source, sink, detector, gateway_factory, shutdown_rx).await
+    tokio::spawn(async move {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigusr1 = signal(SignalKind::user_defined1()).expect("register SIGUSR1");
+        while sigusr1.recv().await.is_some() {
+            if manual_wake_tx.send(()).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    run_supervisor(
+        settings,
+        source,
+        sink,
+        detector,
+        gateway_factory,
+        manual_wake_rx,
+        shutdown_rx,
+    )
+    .await
 }

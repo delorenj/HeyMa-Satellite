@@ -17,6 +17,30 @@ pub struct Settings {
     #[serde(default = "default_wake_threshold")]
     pub wake_threshold: f32,
 
+    /// Emit rate-limited raw wake score diagnostics for tuning physical installs.
+    #[serde(default)]
+    pub wake_debug_scores: bool,
+
+    /// Audio to prepend to each wake-triggered utterance from the rolling mic buffer.
+    #[serde(default = "default_wake_preroll_ms")]
+    pub wake_preroll_ms: u64,
+
+    /// Play a short local confirmation tone immediately after wake detection.
+    #[serde(default)]
+    pub wake_ding_enabled: bool,
+
+    /// Wake confirmation tone frequency in Hz.
+    #[serde(default = "default_wake_ding_frequency_hz")]
+    pub wake_ding_frequency_hz: u32,
+
+    /// Wake confirmation tone duration in milliseconds.
+    #[serde(default = "default_wake_ding_duration_ms")]
+    pub wake_ding_duration_ms: u32,
+
+    /// Wake confirmation tone amplitude, from 0.0 to 1.0.
+    #[serde(default = "default_wake_ding_volume")]
+    pub wake_ding_volume: f32,
+
     /// ALSA/cpal device name for microphone capture. `None` = system default.
     #[serde(default)]
     pub mic_device: Option<String>,
@@ -24,6 +48,12 @@ pub struct Settings {
     /// ALSA/cpal device name for speaker playback. `None` = system default.
     #[serde(default)]
     pub speaker_device: Option<String>,
+
+    /// Optional shell command for speaker playback. WAV bytes are piped to stdin.
+    /// This is useful on Pi audio stacks where CPAL's `default` device does not
+    /// reliably route to the physical jack, but `aplay -D ... -` does.
+    #[serde(default)]
+    pub speaker_command: Option<String>,
 
     /// PCM sample rate in Hz. Must match the wake model expectation (16 kHz).
     #[serde(default = "default_sample_rate")]
@@ -62,6 +92,22 @@ fn default_wake_threshold() -> f32 {
     0.5
 }
 
+fn default_wake_preroll_ms() -> u64 {
+    2_400
+}
+
+fn default_wake_ding_frequency_hz() -> u32 {
+    880
+}
+
+fn default_wake_ding_duration_ms() -> u32 {
+    120
+}
+
+fn default_wake_ding_volume() -> f32 {
+    0.20
+}
+
 fn default_sample_rate() -> u32 {
     16_000
 }
@@ -97,6 +143,15 @@ pub enum ConfigError {
     #[error("sample_rate must be 16000, got {0}")]
     UnsupportedSampleRate(u32),
 
+    #[error("wake_ding_frequency_hz must be positive, got {0}")]
+    InvalidWakeDingFrequency(u32),
+
+    #[error("wake_ding_duration_ms must be in 1..=1000, got {0}")]
+    InvalidWakeDingDuration(u32),
+
+    #[error("wake_ding_volume must be in 0.0..=1.0, got {0}")]
+    InvalidWakeDingVolume(f32),
+
     #[error("gateway_url must begin with ws:// or wss://, got: {0}")]
     InvalidGatewayUrlScheme(String),
 
@@ -107,9 +162,7 @@ pub enum ConfigError {
 impl Settings {
     /// Load settings from `HEYMA_*` environment variables, with sane defaults.
     pub fn from_env() -> Result<Self, ConfigError> {
-        let settings: Settings = Figment::new()
-            .merge(Env::prefixed("HEYMA_"))
-            .extract()?;
+        let settings: Settings = Figment::new().merge(Env::prefixed("HEYMA_")).extract()?;
         settings.validate()?;
         Ok(settings)
     }
@@ -118,7 +171,9 @@ impl Settings {
     pub fn validate(&self) -> Result<(), ConfigError> {
         // F10: gateway URL must use ws:// or wss:// scheme.
         if !self.gateway_url.starts_with("ws://") && !self.gateway_url.starts_with("wss://") {
-            return Err(ConfigError::InvalidGatewayUrlScheme(self.gateway_url.clone()));
+            return Err(ConfigError::InvalidGatewayUrlScheme(
+                self.gateway_url.clone(),
+            ));
         }
         if !(0.0..=1.0).contains(&self.wake_threshold) {
             return Err(ConfigError::InvalidWakeThreshold(self.wake_threshold));
@@ -126,6 +181,19 @@ impl Settings {
         // F11: sample_rate must be exactly 16000 (wake model is trained at 16 kHz).
         if self.sample_rate != 16_000 {
             return Err(ConfigError::UnsupportedSampleRate(self.sample_rate));
+        }
+        if self.wake_ding_frequency_hz == 0 {
+            return Err(ConfigError::InvalidWakeDingFrequency(
+                self.wake_ding_frequency_hz,
+            ));
+        }
+        if self.wake_ding_duration_ms == 0 || self.wake_ding_duration_ms > 1_000 {
+            return Err(ConfigError::InvalidWakeDingDuration(
+                self.wake_ding_duration_ms,
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.wake_ding_volume) {
+            return Err(ConfigError::InvalidWakeDingVolume(self.wake_ding_volume));
         }
         if self.min_utterance_ms >= self.max_utterance_ms {
             return Err(ConfigError::InvalidUtteranceBounds {
@@ -143,8 +211,15 @@ impl Default for Settings {
             gateway_url: default_gateway_url(),
             wake_model_path: default_wake_model_path(),
             wake_threshold: default_wake_threshold(),
+            wake_debug_scores: false,
+            wake_preroll_ms: default_wake_preroll_ms(),
+            wake_ding_enabled: false,
+            wake_ding_frequency_hz: default_wake_ding_frequency_hz(),
+            wake_ding_duration_ms: default_wake_ding_duration_ms(),
+            wake_ding_volume: default_wake_ding_volume(),
             mic_device: None,
             speaker_device: None,
+            speaker_command: None,
             sample_rate: default_sample_rate(),
             silence_threshold_db: default_silence_threshold_db(),
             min_utterance_ms: default_min_utterance_ms(),

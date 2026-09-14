@@ -32,18 +32,19 @@ pub enum ClientMessage {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(dead_code)]
 pub enum ServerMessage {
-    Ready {
-        session_id: String,
-    },
+    Ready { session_id: String },
     ResponseStart {
         format: String,
+        #[serde(default = "default_true", rename = "final")]
+        final_response: bool,
     },
     ResponseEnd,
-    Error {
-        code: String,
-        message: String,
-    },
+    Error { code: String, message: String },
     Close,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -118,9 +119,7 @@ impl TungsteniteGateway {
     }
 
     // F2: wrap connect_async with a 5 s per-attempt timeout.
-    async fn connect_with_timeout(
-        &self,
-    ) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
+    async fn connect_with_timeout(&self) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
         let fut = connect_async(&self.gateway_url);
         match tokio::time::timeout(Duration::from_secs(5), fut).await {
             Ok(Ok((ws_stream, _))) => Ok(ws_stream),
@@ -143,8 +142,7 @@ impl GatewayClient for TungsteniteGateway {
         let wake_started_at = Instant::now();
 
         // F6: overall connect deadline.
-        let connect_deadline = Instant::now()
-            + Duration::from_millis(self.connect_deadline_ms);
+        let connect_deadline = Instant::now() + Duration::from_millis(self.connect_deadline_ms);
 
         // ---- Exponential backoff connect loop ----
         let mut attempt = 0u32;
@@ -205,25 +203,24 @@ impl GatewayClient for TungsteniteGateway {
             .context("send hello")?;
 
         // ---- F2: Await ready with 10 s timeout ----
-        let ready_msg = tokio::time::timeout(
-            Duration::from_secs(10),
-            receive_json(&mut ws),
-        )
-        .await
-        .map_err(|_| {
-            tracing::warn!(
-                event = "gateway_phase_timeout",
-                phase = "await_ready",
-                session_id = %session_id,
-                latency_ms = wake_started_at.elapsed().as_millis() as u64,
-                gateway_url = %self.gateway_url,
-            );
-            anyhow::anyhow!("timeout waiting for ready from gateway")
-        })??;
+        let ready_msg = tokio::time::timeout(Duration::from_secs(10), receive_json(&mut ws))
+            .await
+            .map_err(|_| {
+                tracing::warn!(
+                    event = "gateway_phase_timeout",
+                    phase = "await_ready",
+                    session_id = %session_id,
+                    latency_ms = wake_started_at.elapsed().as_millis() as u64,
+                    gateway_url = %self.gateway_url,
+                );
+                anyhow::anyhow!("timeout waiting for ready from gateway")
+            })??;
 
         // F13: verify session_id in ready matches what we sent.
         match ready_msg {
-            ServerMessage::Ready { session_id: server_sid } => {
+            ServerMessage::Ready {
+                session_id: server_sid,
+            } => {
                 if server_sid != session_id {
                     bail!(
                         "session_id mismatch: sent {}, gateway returned {}",
@@ -285,82 +282,87 @@ impl GatewayClient for TungsteniteGateway {
         }
 
         // ---- Send end_of_input ----
-        let eoi = serde_json::to_string(&ClientMessage::EndOfInput)
-            .context("serialize end_of_input")?;
+        let eoi =
+            serde_json::to_string(&ClientMessage::EndOfInput).context("serialize end_of_input")?;
         ws.send(Message::Text(eoi.into()))
             .await
             .context("send end_of_input")?;
 
-        // ---- F2: Await response_start with configurable timeout ----
-        let rsp_start_msg = tokio::time::timeout(
-            Duration::from_millis(self.response_timeout_ms),
-            receive_json_no_binary(&mut ws),
-        )
-        .await
-        .map_err(|_| {
-            tracing::warn!(
-                event = "gateway_phase_timeout",
-                phase = "await_response_start",
-                session_id = %session_id,
-                latency_ms = wake_started_at.elapsed().as_millis() as u64,
-                gateway_url = %self.gateway_url,
-            );
-            anyhow::anyhow!("timeout waiting for response_start from gateway")
-        })??;
-
-        match rsp_start_msg {
-            ServerMessage::ResponseStart { .. } => {}
-            ServerMessage::Error { code, message } => {
-                bail!("gateway error after end_of_input: [{code}] {message}");
-            }
-            other => bail!("expected response_start, got {:?}", other),
-        }
-
-        // ---- Collect WAV binary frames until response_end (F12: cap at 10 MB) ----
-        let mut wav_buf: Vec<u8> = Vec::new();
         loop {
-            let msg = ws
-                .next()
-                .await
-                .context("ws stream ended before response_end")?
-                .context("ws recv")?;
-            match msg {
-                Message::Binary(b) => {
-                    wav_buf.extend_from_slice(&b);
-                    // F12: cap at MAX_WAV_BYTES.
-                    if wav_buf.len() > MAX_WAV_BYTES {
-                        bail!(
-                            "gateway response too large: {} bytes exceeds {} byte cap",
-                            wav_buf.len(),
-                            MAX_WAV_BYTES
-                        );
-                    }
+            // ---- F2: Await response_start with configurable timeout ----
+            let rsp_start_msg = tokio::time::timeout(
+                Duration::from_millis(self.response_timeout_ms),
+                receive_json_no_binary(&mut ws),
+            )
+            .await
+            .map_err(|_| {
+                tracing::warn!(
+                    event = "gateway_phase_timeout",
+                    phase = "await_response_start",
+                    session_id = %session_id,
+                    latency_ms = wake_started_at.elapsed().as_millis() as u64,
+                    gateway_url = %self.gateway_url,
+                );
+                anyhow::anyhow!("timeout waiting for response_start from gateway")
+            })??;
+
+            let final_response = match rsp_start_msg {
+                ServerMessage::ResponseStart { final_response, .. } => final_response,
+                ServerMessage::Error { code, message } => {
+                    bail!("gateway error after end_of_input: [{code}] {message}");
                 }
-                Message::Text(t) => {
-                    let srv: ServerMessage =
-                        serde_json::from_str(&t).context("deserialize server msg")?;
-                    match srv {
-                        ServerMessage::ResponseEnd => break,
-                        ServerMessage::Error { code, message } => {
-                            bail!("gateway error during WAV recv: [{code}] {message}");
+                other => bail!("expected response_start, got {:?}", other),
+            };
+
+            // ---- Collect WAV binary frames until response_end (F12: cap at 10 MB) ----
+            let mut wav_buf: Vec<u8> = Vec::new();
+            loop {
+                let msg = ws
+                    .next()
+                    .await
+                    .context("ws stream ended before response_end")?
+                    .context("ws recv")?;
+                match msg {
+                    Message::Binary(b) => {
+                        wav_buf.extend_from_slice(&b);
+                        // F12: cap at MAX_WAV_BYTES.
+                        if wav_buf.len() > MAX_WAV_BYTES {
+                            bail!(
+                                "gateway response too large: {} bytes exceeds {} byte cap",
+                                wav_buf.len(),
+                                MAX_WAV_BYTES
+                            );
                         }
-                        other => bail!("unexpected message during WAV recv: {:?}", other),
                     }
+                    Message::Text(t) => {
+                        let srv: ServerMessage =
+                            serde_json::from_str(&t).context("deserialize server msg")?;
+                        match srv {
+                            ServerMessage::ResponseEnd => break,
+                            ServerMessage::Error { code, message } => {
+                                bail!("gateway error during WAV recv: [{code}] {message}");
+                            }
+                            other => bail!("unexpected message during WAV recv: {:?}", other),
+                        }
+                    }
+                    Message::Close(_) => bail!("gateway closed mid-response"),
+                    _ => {} // ping/pong handled by tungstenite internally
                 }
-                Message::Close(_) => bail!("gateway closed mid-response"),
-                _ => {} // ping/pong handled by tungstenite internally
+            }
+
+            // ---- Play WAV ----
+            sink.play_wav(Bytes::from(wav_buf))
+                .context("play WAV response")?;
+
+            if final_response {
+                break;
             }
         }
 
         // ---- Send close ----
-        let close_msg =
-            serde_json::to_string(&ClientMessage::Close).context("serialize close")?;
+        let close_msg = serde_json::to_string(&ClientMessage::Close).context("serialize close")?;
         // Best-effort; ignore error (gateway may have already closed).
         let _ = ws.send(Message::Text(close_msg.into())).await;
-
-        // ---- Play WAV ----
-        sink.play_wav(Bytes::from(wav_buf))
-            .context("play WAV response")?;
 
         Ok(frame_count)
     }

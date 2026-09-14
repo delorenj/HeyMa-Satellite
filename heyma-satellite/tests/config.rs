@@ -106,6 +106,41 @@ fn test_env_var_overrides_wake_threshold() {
 }
 
 #[test]
+fn test_env_var_enables_wake_debug_scores() {
+    with_env(&[("HEYMA_WAKE_DEBUG_SCORES", "true")], || {
+        let settings = Settings::from_env().expect("load settings");
+        assert!(settings.wake_debug_scores);
+    });
+}
+
+#[test]
+fn test_env_var_sets_wake_preroll_ms() {
+    with_env(&[("HEYMA_WAKE_PREROLL_MS", "3200")], || {
+        let settings = Settings::from_env().expect("load settings");
+        assert_eq!(settings.wake_preroll_ms, 3_200);
+    });
+}
+
+#[test]
+fn test_env_var_sets_wake_ding() {
+    with_env(
+        &[
+            ("HEYMA_WAKE_DING_ENABLED", "true"),
+            ("HEYMA_WAKE_DING_FREQUENCY_HZ", "1046"),
+            ("HEYMA_WAKE_DING_DURATION_MS", "90"),
+            ("HEYMA_WAKE_DING_VOLUME", "0.35"),
+        ],
+        || {
+            let settings = Settings::from_env().expect("load settings");
+            assert!(settings.wake_ding_enabled);
+            assert_eq!(settings.wake_ding_frequency_hz, 1_046);
+            assert_eq!(settings.wake_ding_duration_ms, 90);
+            assert!((settings.wake_ding_volume - 0.35).abs() < 1e-5);
+        },
+    );
+}
+
+#[test]
 fn test_env_var_sets_mic_device() {
     with_env(&[("HEYMA_MIC_DEVICE", "ReSpeaker")], || {
         let settings = Settings::from_env().expect("load settings");
@@ -119,6 +154,23 @@ fn test_env_var_sets_speaker_device() {
         let settings = Settings::from_env().expect("load settings");
         assert_eq!(settings.speaker_device, Some("plughw:0,0".to_string()));
     });
+}
+
+#[test]
+fn test_env_var_sets_speaker_command() {
+    with_env(
+        &[(
+            "HEYMA_SPEAKER_COMMAND",
+            "aplay -q -D plughw:CARD=wm8960soundcard,DEV=0 -",
+        )],
+        || {
+            let settings = Settings::from_env().expect("load settings");
+            assert_eq!(
+                settings.speaker_command,
+                Some("aplay -q -D plughw:CARD=wm8960soundcard,DEV=0 -".to_string())
+            );
+        },
+    );
 }
 
 #[test]
@@ -140,7 +192,9 @@ fn test_env_var_sets_min_max_utterance_ms() {
 fn test_validation_rejects_wake_threshold_above_one() {
     let mut settings = Settings::default();
     settings.wake_threshold = 1.5;
-    let err = settings.validate().expect_err("must reject threshold > 1.0");
+    let err = settings
+        .validate()
+        .expect_err("must reject threshold > 1.0");
     assert!(matches!(err, ConfigError::InvalidWakeThreshold(_)));
 }
 
@@ -148,7 +202,9 @@ fn test_validation_rejects_wake_threshold_above_one() {
 fn test_validation_rejects_wake_threshold_below_zero() {
     let mut settings = Settings::default();
     settings.wake_threshold = -0.1;
-    let err = settings.validate().expect_err("must reject threshold < 0.0");
+    let err = settings
+        .validate()
+        .expect_err("must reject threshold < 0.0");
     assert!(matches!(err, ConfigError::InvalidWakeThreshold(_)));
 }
 
@@ -156,7 +212,9 @@ fn test_validation_rejects_wake_threshold_below_zero() {
 fn test_validation_rejects_non_16000_sample_rate() {
     let mut settings = Settings::default();
     settings.sample_rate = 44_100;
-    let err = settings.validate().expect_err("must reject sample_rate != 16000");
+    let err = settings
+        .validate()
+        .expect_err("must reject sample_rate != 16000");
     assert!(matches!(err, ConfigError::UnsupportedSampleRate(44_100)));
 }
 
@@ -164,8 +222,40 @@ fn test_validation_rejects_non_16000_sample_rate() {
 fn test_validation_rejects_zero_sample_rate() {
     let mut settings = Settings::default();
     settings.sample_rate = 0;
-    let err = settings.validate().expect_err("must reject sample_rate = 0");
+    let err = settings
+        .validate()
+        .expect_err("must reject sample_rate = 0");
     assert!(matches!(err, ConfigError::UnsupportedSampleRate(0)));
+}
+
+#[test]
+fn test_validation_rejects_invalid_wake_ding_frequency() {
+    let mut settings = Settings::default();
+    settings.wake_ding_frequency_hz = 0;
+    let err = settings
+        .validate()
+        .expect_err("must reject zero wake ding frequency");
+    assert!(matches!(err, ConfigError::InvalidWakeDingFrequency(0)));
+}
+
+#[test]
+fn test_validation_rejects_invalid_wake_ding_duration() {
+    let mut settings = Settings::default();
+    settings.wake_ding_duration_ms = 1_001;
+    let err = settings
+        .validate()
+        .expect_err("must reject long wake ding duration");
+    assert!(matches!(err, ConfigError::InvalidWakeDingDuration(1_001)));
+}
+
+#[test]
+fn test_validation_rejects_invalid_wake_ding_volume() {
+    let mut settings = Settings::default();
+    settings.wake_ding_volume = 1.1;
+    let err = settings
+        .validate()
+        .expect_err("must reject wake ding volume > 1.0");
+    assert!(matches!(err, ConfigError::InvalidWakeDingVolume(_)));
 }
 
 #[test]
@@ -189,7 +279,9 @@ fn test_validation_accepts_wss_gateway_url() {
 fn test_validation_accepts_ws_gateway_url() {
     let settings = Settings::default();
     // Default is ws:// so this validates the default passes.
-    settings.validate().expect("default ws:// URL must be accepted");
+    settings
+        .validate()
+        .expect("default ws:// URL must be accepted");
 }
 
 #[test]
@@ -200,10 +292,7 @@ fn test_validation_rejects_min_gte_max_utterance() {
     let err = settings
         .validate()
         .expect_err("must reject min_utterance_ms >= max_utterance_ms");
-    assert!(matches!(
-        err,
-        ConfigError::InvalidUtteranceBounds { .. }
-    ));
+    assert!(matches!(err, ConfigError::InvalidUtteranceBounds { .. }));
 }
 
 #[test]
@@ -211,13 +300,17 @@ fn test_round_trip_all_fields() {
     with_env(
         &[
             ("HEYMA_GATEWAY_URL", "ws://127.0.0.1:8778/v1/voice"),
-            (
-                "HEYMA_WAKE_MODEL_PATH",
-                "/tmp/hey_tonny.onnx",
-            ),
+            ("HEYMA_WAKE_MODEL_PATH", "/tmp/hey_tonny.onnx"),
             ("HEYMA_WAKE_THRESHOLD", "0.6"),
+            ("HEYMA_WAKE_DEBUG_SCORES", "true"),
+            ("HEYMA_WAKE_PREROLL_MS", "3200"),
+            ("HEYMA_WAKE_DING_ENABLED", "true"),
+            ("HEYMA_WAKE_DING_FREQUENCY_HZ", "1046"),
+            ("HEYMA_WAKE_DING_DURATION_MS", "90"),
+            ("HEYMA_WAKE_DING_VOLUME", "0.35"),
             ("HEYMA_MIC_DEVICE", "hw:1,0"),
             ("HEYMA_SPEAKER_DEVICE", "hw:1,1"),
+            ("HEYMA_SPEAKER_COMMAND", "aplay -q -D plughw:0,0 -"),
             ("HEYMA_SAMPLE_RATE", "16000"),
             ("HEYMA_SILENCE_THRESHOLD_DB", "-35.0"),
             ("HEYMA_MIN_UTTERANCE_MS", "400"),
@@ -228,8 +321,18 @@ fn test_round_trip_all_fields() {
             assert_eq!(s.gateway_url, "ws://127.0.0.1:8778/v1/voice");
             assert_eq!(s.wake_model_path.to_str().unwrap(), "/tmp/hey_tonny.onnx");
             assert!((s.wake_threshold - 0.6).abs() < 1e-5);
+            assert!(s.wake_debug_scores);
+            assert_eq!(s.wake_preroll_ms, 3_200);
+            assert!(s.wake_ding_enabled);
+            assert_eq!(s.wake_ding_frequency_hz, 1_046);
+            assert_eq!(s.wake_ding_duration_ms, 90);
+            assert!((s.wake_ding_volume - 0.35).abs() < 1e-5);
             assert_eq!(s.mic_device, Some("hw:1,0".to_string()));
             assert_eq!(s.speaker_device, Some("hw:1,1".to_string()));
+            assert_eq!(
+                s.speaker_command,
+                Some("aplay -q -D plughw:0,0 -".to_string())
+            );
             assert_eq!(s.sample_rate, 16_000);
             assert!((s.silence_threshold_db - (-35.0)).abs() < 1e-5);
             assert_eq!(s.min_utterance_ms, 400);

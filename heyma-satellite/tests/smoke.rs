@@ -8,16 +8,17 @@ mod audio;
 mod config;
 #[path = "../src/gateway.rs"]
 mod gateway;
+#[path = "../src/main.rs"]
+mod main_mod;
 #[path = "../src/utterance.rs"]
 mod utterance;
 #[path = "../src/wake.rs"]
 mod wake;
-#[path = "../src/main.rs"]
-mod main_mod;
 
-use audio::{AudioFrame, AudioSink, AudioSource};
 use anyhow::Result;
+use audio::{AudioFrame, AudioSink, AudioSource};
 use bytes::Bytes;
+use config::Settings;
 use futures_util::{SinkExt, StreamExt};
 use gateway::{GatewayClient, GatewayFactory};
 use std::net::SocketAddr;
@@ -26,7 +27,6 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use wake::{WakeDetector, WakeEvent, WAKE_SENTINEL};
-use config::Settings;
 
 // ---------------------------------------------------------------------------
 // Stub AudioSource
@@ -105,10 +105,7 @@ impl AudioSink for CaptureSink {
 struct SmokeWakeDetector;
 
 impl WakeDetector for SmokeWakeDetector {
-    fn start(
-        self: Box<Self>,
-        mut rx: mpsc::Receiver<AudioFrame>,
-    ) -> mpsc::Receiver<WakeEvent> {
+    fn start(self: Box<Self>, mut rx: mpsc::Receiver<AudioFrame>) -> mpsc::Receiver<WakeEvent> {
         let (tx, wake_rx) = mpsc::channel(4);
         tokio::spawn(async move {
             while let Some(frame) = rx.recv().await {
@@ -118,7 +115,13 @@ impl WakeDetector for SmokeWakeDetector {
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis() as u64;
-                    if tx.send(WakeEvent { detected_at_ms: now_ms }).await.is_err() {
+                    if tx
+                        .send(WakeEvent {
+                            detected_at_ms: now_ms,
+                        })
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -172,7 +175,9 @@ async fn spawn_fake_gateway() -> (SocketAddr, tokio::task::JoinHandle<()>) {
 
         // Send ready with matching session_id.
         let ready = serde_json::json!({ "type": "ready", "session_id": session_id });
-        ws.send(Message::Text(ready.to_string().into())).await.unwrap();
+        ws.send(Message::Text(ready.to_string().into()))
+            .await
+            .unwrap();
 
         // Drain PCM + end_of_input.
         loop {
@@ -181,7 +186,9 @@ async fn spawn_fake_gateway() -> (SocketAddr, tokio::task::JoinHandle<()>) {
                 Message::Binary(_) => {}
                 Message::Text(t) => {
                     let v: serde_json::Value = serde_json::from_str(&t).unwrap();
-                    if v["type"] == "end_of_input" { break; }
+                    if v["type"] == "end_of_input" {
+                        break;
+                    }
                 }
                 _ => {}
             }
@@ -189,11 +196,15 @@ async fn spawn_fake_gateway() -> (SocketAddr, tokio::task::JoinHandle<()>) {
 
         // Send response.
         let rsp_start = serde_json::json!({ "type": "response_start", "format": "wav" });
-        ws.send(Message::Text(rsp_start.to_string().into())).await.unwrap();
+        ws.send(Message::Text(rsp_start.to_string().into()))
+            .await
+            .unwrap();
         let wav = make_wav(&vec![0u8; 320]);
         ws.send(Message::Binary(wav.into())).await.unwrap();
         let rsp_end = serde_json::json!({ "type": "response_end" });
-        ws.send(Message::Text(rsp_end.to_string().into())).await.unwrap();
+        ws.send(Message::Text(rsp_end.to_string().into()))
+            .await
+            .unwrap();
 
         // Drain close.
         tokio::time::timeout(std::time::Duration::from_millis(300), async {
@@ -237,7 +248,7 @@ async fn test_full_wake_stream_playback_cycle() {
     // Build settings with very short min_utterance_ms so test finishes quickly.
     let settings = Arc::new(Settings {
         gateway_url: format!("ws://127.0.0.1:{}/v1/voice", addr.port()),
-        min_utterance_ms: 80,    // 1 frame
+        min_utterance_ms: 80, // 1 frame
         max_utterance_ms: 30_000,
         silence_threshold_db: -40.0,
         sample_rate: 16_000,
@@ -253,11 +264,11 @@ async fn test_full_wake_stream_playback_cycle() {
 
     // F1: wrap TungsteniteGateway in a factory closure.
     let gw_url = format!("ws://127.0.0.1:{}/v1/voice", addr.port());
-    let gateway_factory: GatewayFactory = Arc::new(move || {
-        Box::new(gateway::TungsteniteGateway::new(gw_url.clone()))
-    });
+    let gateway_factory: GatewayFactory =
+        Arc::new(move || Box::new(gateway::TungsteniteGateway::new(gw_url.clone())));
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (_manual_wake_tx, manual_wake_rx) = mpsc::channel::<()>(4);
 
     // Run supervisor in a task; shut it down after playback completes.
     let supervisor = tokio::spawn(main_mod::run_supervisor(
@@ -266,6 +277,7 @@ async fn test_full_wake_stream_playback_cycle() {
         sink,
         detector,
         gateway_factory,
+        manual_wake_rx,
         shutdown_rx,
     ));
 
@@ -288,6 +300,61 @@ async fn test_full_wake_stream_playback_cycle() {
 }
 
 #[tokio::test]
+async fn test_manual_wake_stream_playback_cycle() {
+    // No sentinel frame here: the manual wake channel is the trigger, while
+    // capture, gateway streaming, response collection, and playback stay real.
+    let frames = vec![AudioFrame::from_samples(&vec![0i16; 1280]); 20];
+    let (addr, gw_handle) = spawn_fake_gateway().await;
+    let settings = Arc::new(Settings {
+        gateway_url: format!("ws://127.0.0.1:{}/v1/voice", addr.port()),
+        min_utterance_ms: 80,
+        max_utterance_ms: 30_000,
+        silence_threshold_db: -40.0,
+        sample_rate: 16_000,
+        ..Settings::default()
+    });
+
+    let (played_tx, mut played_rx) = mpsc::channel::<Vec<u8>>(4);
+    let source = Box::new(StubAudioSource::new(frames));
+    let sink = Box::new(CaptureSink::new(played_tx));
+    let detector = Box::new(SmokeWakeDetector);
+
+    let gw_url = format!("ws://127.0.0.1:{}/v1/voice", addr.port());
+    let gateway_factory: GatewayFactory =
+        Arc::new(move || Box::new(gateway::TungsteniteGateway::new(gw_url.clone())));
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (manual_wake_tx, manual_wake_rx) = mpsc::channel::<()>(4);
+
+    let supervisor = tokio::spawn(main_mod::run_supervisor(
+        settings,
+        source,
+        sink,
+        detector,
+        gateway_factory,
+        manual_wake_rx,
+        shutdown_rx,
+    ));
+
+    manual_wake_tx
+        .send(())
+        .await
+        .expect("manual wake channel should be open");
+
+    let wav = tokio::time::timeout(std::time::Duration::from_secs(5), played_rx.recv())
+        .await
+        .expect("timed out waiting for manual-trigger playback")
+        .expect("played channel closed without data");
+
+    assert_eq!(&wav[0..4], b"RIFF", "played WAV must start with RIFF");
+    assert_eq!(&wav[8..12], b"WAVE", "played WAV must contain WAVE");
+
+    let _ = shutdown_tx.send(());
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), supervisor).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), gw_handle).await;
+}
+
+#[tokio::test]
 async fn test_clean_shutdown_on_signal() {
     // Supervisor receives shutdown signal before any wake fires; should stop cleanly.
     let settings = Arc::new(Settings::default());
@@ -300,6 +367,7 @@ async fn test_clean_shutdown_on_signal() {
     let gateway_factory: GatewayFactory = Arc::new(|| Box::new(StubGatewayClient));
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (_manual_wake_tx, manual_wake_rx) = mpsc::channel::<()>(4);
 
     let supervisor = tokio::spawn(main_mod::run_supervisor(
         settings,
@@ -307,6 +375,7 @@ async fn test_clean_shutdown_on_signal() {
         sink,
         detector,
         gateway_factory,
+        manual_wake_rx,
         shutdown_rx,
     ));
 
@@ -316,7 +385,9 @@ async fn test_clean_shutdown_on_signal() {
     let result = tokio::time::timeout(std::time::Duration::from_secs(2), supervisor)
         .await
         .expect("supervisor must stop within 2s after shutdown signal");
-    result.expect("supervisor task panicked").expect("supervisor returned error");
+    result
+        .expect("supervisor task panicked")
+        .expect("supervisor returned error");
 }
 
 // ---------------------------------------------------------------------------

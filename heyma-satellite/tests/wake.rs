@@ -36,7 +36,11 @@ fn signal_frame() -> AudioFrame {
             // Simple sawtooth, never equals WAKE_SENTINEL
             let v = ((i % 100) as i32 * 200 - 10_000) as i16;
             // Avoid accidentally hitting WAKE_SENTINEL
-            if v == WAKE_SENTINEL { v.wrapping_add(1) } else { v }
+            if v == WAKE_SENTINEL {
+                v.wrapping_add(1)
+            } else {
+                v
+            }
         })
         .collect();
     AudioFrame::from_samples(&samples)
@@ -51,13 +55,10 @@ async fn test_stub_detector_fires_on_sentinel_frame() {
     // Send a wake-trigger frame.
     tx.send(wake_frame()).await.unwrap();
     // Give the async task a moment to process.
-    let event = tokio::time::timeout(
-        std::time::Duration::from_millis(200),
-        wake_rx.recv(),
-    )
-    .await
-    .expect("timed out waiting for wake event")
-    .expect("wake channel closed");
+    let event = tokio::time::timeout(std::time::Duration::from_millis(200), wake_rx.recv())
+        .await
+        .expect("timed out waiting for wake event")
+        .expect("wake channel closed");
 
     assert!(event.detected_at_ms > 0);
 }
@@ -76,7 +77,10 @@ async fn test_stub_detector_no_false_positive_on_silence() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // wake_rx should have no pending events.
-    assert!(wake_rx.try_recv().is_err(), "silent frames must not trigger wake");
+    assert!(
+        wake_rx.try_recv().is_err(),
+        "silent frames must not trigger wake"
+    );
 }
 
 #[tokio::test]
@@ -113,16 +117,16 @@ async fn test_stub_detector_fires_exactly_once_per_sentinel() {
 
     // Collect all events.
     let mut count = 0;
-    while let Ok(Some(event)) = tokio::time::timeout(
-        std::time::Duration::from_millis(200),
-        wake_rx.recv(),
-    )
-    .await
+    while let Ok(Some(event)) =
+        tokio::time::timeout(std::time::Duration::from_millis(200), wake_rx.recv()).await
     {
         count += 1;
         assert!(event.detected_at_ms > 0);
     }
-    assert_eq!(count, 2, "exactly 2 wake events expected for 2 sentinel frames");
+    assert_eq!(
+        count, 2,
+        "exactly 2 wake events expected for 2 sentinel frames"
+    );
 }
 
 #[tokio::test]
@@ -135,11 +139,7 @@ async fn test_stub_detector_stops_when_sender_dropped() {
     drop(tx);
 
     // The wake_rx channel should close cleanly (recv returns None).
-    let result = tokio::time::timeout(
-        std::time::Duration::from_millis(200),
-        wake_rx.recv(),
-    )
-    .await;
+    let result = tokio::time::timeout(std::time::Duration::from_millis(200), wake_rx.recv()).await;
     // Either timeout or None is acceptable. The key is no panic.
     match result {
         Ok(None) => {} // channel closed cleanly
@@ -164,8 +164,7 @@ mod real_wake_tests {
     /// Resolve the absolute path to assets/openwakeword/alexa.onnx relative to
     /// the crate root (CARGO_MANIFEST_DIR is set by the test harness).
     fn alexa_onnx_path() -> PathBuf {
-        let manifest = std::env::var("CARGO_MANIFEST_DIR")
-            .expect("CARGO_MANIFEST_DIR not set");
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
         PathBuf::from(manifest)
             .join("assets")
             .join("openwakeword")
@@ -200,11 +199,8 @@ mod real_wake_tests {
         // fails inside the task the channel closes immediately. We verify it
         // does NOT close within a short window (model loaded successfully).
         let mut wake_rx = detector.start(rx);
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(3_000),
-            wake_rx.recv(),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(3_000), wake_rx.recv()).await;
         // A timeout means the channel is open (no init failure closed it).
         // A None result would mean the task exited, indicating init failure.
         match result {
@@ -236,11 +232,7 @@ mod real_wake_tests {
         // Drain any events that arrived.
         let mut event_count = 0usize;
         loop {
-            match tokio::time::timeout(
-                std::time::Duration::from_millis(500),
-                wake_rx.recv(),
-            )
-            .await
+            match tokio::time::timeout(std::time::Duration::from_millis(500), wake_rx.recv()).await
             {
                 Ok(Some(_)) => event_count += 1,
                 Ok(None) | Err(_) => break,
@@ -261,8 +253,7 @@ mod real_wake_tests {
     #[tokio::test]
     #[ignore = "requires tests/fixtures/alexa.wav; record with: arecord -f S16_LE -r 16000 -c 1 tests/fixtures/alexa.wav"]
     async fn test_real_detector_fires_on_alexa_wav() {
-        let manifest = std::env::var("CARGO_MANIFEST_DIR")
-            .expect("CARGO_MANIFEST_DIR not set");
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
         let wav_path = PathBuf::from(&manifest)
             .join("tests")
             .join("fixtures")
@@ -274,8 +265,7 @@ mod real_wake_tests {
         }
 
         // Read WAV and chunk into 1280-sample (80 ms) frames.
-        let mut reader = hound::WavReader::open(&wav_path)
-            .expect("failed to open alexa.wav");
+        let mut reader = hound::WavReader::open(&wav_path).expect("failed to open alexa.wav");
         let spec = reader.spec();
         assert_eq!(spec.sample_rate, 16_000, "fixture must be 16 kHz");
         assert_eq!(spec.channels, 1, "fixture must be mono");
@@ -305,17 +295,11 @@ mod real_wake_tests {
         drop(tx);
 
         // Expect at least one WakeEvent within 5 seconds.
-        let event = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            wake_rx.recv(),
-        )
-        .await
-        .expect("timed out waiting for wake event on alexa WAV")
-        .expect("wake_rx closed before event");
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), wake_rx.recv())
+            .await
+            .expect("timed out waiting for wake event on alexa WAV")
+            .expect("wake_rx closed before event");
 
-        assert!(
-            event.detected_at_ms > 0,
-            "WakeEvent has zero timestamp"
-        );
+        assert!(event.detected_at_ms > 0, "WakeEvent has zero timestamp");
     }
 }

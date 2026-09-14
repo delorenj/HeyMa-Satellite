@@ -33,7 +33,9 @@ struct CaptureSink {
 
 impl CaptureSink {
     fn new() -> Self {
-        CaptureSink { captured: Vec::new() }
+        CaptureSink {
+            captured: Vec::new(),
+        }
     }
 }
 
@@ -58,11 +60,11 @@ fn make_wav(pcm_bytes: &[u8]) -> Vec<u8> {
     wav.extend_from_slice(b"WAVE");
     wav.extend_from_slice(b"fmt ");
     wav.extend_from_slice(&16u32.to_le_bytes()); // chunk size
-    wav.extend_from_slice(&1u16.to_le_bytes());  // PCM
-    wav.extend_from_slice(&1u16.to_le_bytes());  // mono
+    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    wav.extend_from_slice(&1u16.to_le_bytes()); // mono
     wav.extend_from_slice(&16_000u32.to_le_bytes()); // sample rate
     wav.extend_from_slice(&32_000u32.to_le_bytes()); // byte rate
-    wav.extend_from_slice(&2u16.to_le_bytes());  // block align
+    wav.extend_from_slice(&2u16.to_le_bytes()); // block align
     wav.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
     wav.extend_from_slice(b"data");
     wav.extend_from_slice(&data_len.to_le_bytes());
@@ -133,6 +135,7 @@ async fn spawn_fake_gateway(
             }
         }
         assert!(record.end_of_input_received, "end_of_input never received");
+        assert_eq!(record.pcm_frame_count, expected_pcm_frames);
 
         // 4. Send response_start.
         let rsp_start = serde_json::json!({ "type": "response_start", "format": "wav" });
@@ -145,7 +148,9 @@ async fn spawn_fake_gateway(
         let wav_bytes = make_wav(&pcm_silence);
         let chunk_size = (wav_bytes.len() + wav_chunk_count - 1) / wav_chunk_count;
         for chunk in wav_bytes.chunks(chunk_size) {
-            ws.send(Message::Binary(chunk.to_vec().into())).await.unwrap();
+            ws.send(Message::Binary(chunk.to_vec().into()))
+                .await
+                .unwrap();
             record.wav_total_bytes += chunk.len();
         }
 
@@ -156,6 +161,98 @@ async fn spawn_fake_gateway(
             .unwrap();
 
         // 7. Wait for close from client (best-effort, don't block).
+        tokio::time::timeout(std::time::Duration::from_millis(200), async {
+            while let Some(Ok(msg)) = ws.next().await {
+                if let Message::Text(t) = msg {
+                    let v: serde_json::Value = serde_json::from_str(&t).unwrap_or_default();
+                    if v["type"] == "close" {
+                        record.close_received = true;
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .ok();
+
+        record
+    });
+
+    (addr, handle)
+}
+
+async fn spawn_multi_response_gateway(
+    expected_pcm_frames: usize,
+) -> (SocketAddr, tokio::task::JoinHandle<FakeGatewayRecord>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let handle = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = accept_async(stream).await.unwrap();
+        let mut record = FakeGatewayRecord::default();
+
+        let msg = ws.next().await.unwrap().unwrap();
+        if let Message::Text(t) = msg {
+            let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+            assert_eq!(v["type"], "hello");
+            record.hello_session_id = v["session_id"].as_str().unwrap().to_string();
+            record.hello_sample_rate = v["sample_rate"].as_u64().unwrap() as u32;
+            record.hello_encoding = v["encoding"].as_str().unwrap().to_string();
+            record.hello_channels = v["channels"].as_u64().unwrap() as u8;
+            record.hello_client = v["client"].as_str().unwrap().to_string();
+        } else {
+            panic!("expected text hello, got {:?}", msg);
+        }
+
+        let ready = serde_json::json!({
+            "type": "ready",
+            "session_id": record.hello_session_id,
+        });
+        ws.send(Message::Text(ready.to_string().into()))
+            .await
+            .unwrap();
+
+        loop {
+            let msg = ws.next().await.unwrap().unwrap();
+            match msg {
+                Message::Binary(b) => {
+                    record.pcm_frame_count += 1;
+                    record.pcm_total_bytes += b.len();
+                }
+                Message::Text(t) => {
+                    let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+                    if v["type"] == "end_of_input" {
+                        record.end_of_input_received = true;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(record.pcm_frame_count, expected_pcm_frames);
+
+        let ack_wav = make_wav(&vec![0u8; 160]);
+        let final_wav = make_wav(&vec![1u8; 320]);
+        for (final_response, wav_bytes) in [(false, ack_wav), (true, final_wav)] {
+            let rsp_start = serde_json::json!({
+                "type": "response_start",
+                "format": "wav",
+                "final": final_response,
+            });
+            ws.send(Message::Text(rsp_start.to_string().into()))
+                .await
+                .unwrap();
+            ws.send(Message::Binary(wav_bytes.clone().into()))
+                .await
+                .unwrap();
+            record.wav_total_bytes += wav_bytes.len();
+            let rsp_end = serde_json::json!({ "type": "response_end" });
+            ws.send(Message::Text(rsp_end.to_string().into()))
+                .await
+                .unwrap();
+        }
+
         tokio::time::timeout(std::time::Duration::from_millis(200), async {
             while let Some(Ok(msg)) = ws.next().await {
                 if let Message::Text(t) = msg {
@@ -307,7 +404,10 @@ async fn test_end_of_input_sent() {
         .expect("send_utterance");
 
     let record = server_handle.await.unwrap();
-    assert!(record.end_of_input_received, "end_of_input not received by server");
+    assert!(
+        record.end_of_input_received,
+        "end_of_input not received by server"
+    );
 }
 
 #[tokio::test]
@@ -320,7 +420,10 @@ async fn test_wav_assembled_correctly() {
     let mut sink = CaptureSink::new();
 
     let (audio_tx, mut audio_rx) = mpsc::channel::<AudioFrame>(8);
-    audio_tx.send(build_audio_frames(1).remove(0)).await.unwrap();
+    audio_tx
+        .send(build_audio_frames(1).remove(0))
+        .await
+        .unwrap();
     drop(audio_tx);
 
     client
@@ -366,6 +469,32 @@ async fn test_response_end_consumed() {
     server_handle.await.unwrap();
 }
 
+#[tokio::test]
+async fn test_non_final_response_blocks_are_played_before_final_response() {
+    let frame_count = 2;
+    let (addr, server_handle) = spawn_multi_response_gateway(frame_count).await;
+
+    let url = format!("ws://127.0.0.1:{}", addr.port());
+    let mut client = TungsteniteGateway::new(url);
+    let mut sink = CaptureSink::new();
+
+    let (audio_tx, mut audio_rx) = mpsc::channel::<AudioFrame>(16);
+    for f in build_audio_frames(frame_count) {
+        audio_tx.send(f).await.unwrap();
+    }
+    drop(audio_tx);
+
+    client
+        .send_utterance("session-multi-response", 16_000, &mut audio_rx, &mut sink)
+        .await
+        .expect("send_utterance failed");
+
+    let record = server_handle.await.unwrap();
+    assert_eq!(record.pcm_frame_count, frame_count);
+    assert!(record.close_received);
+    assert_eq!(sink.captured.len(), record.wav_total_bytes);
+}
+
 // ---------------------------------------------------------------------------
 // F18: AC #5 -- gateway disconnects mid-utterance (drops WS without response_start)
 // ---------------------------------------------------------------------------
@@ -393,7 +522,9 @@ async fn test_gateway_disconnect_mid_utterance_returns_error() {
 
         // 2. Send ready.
         let ready = serde_json::json!({ "type": "ready", "session_id": session_id });
-        ws.send(Message::Text(ready.to_string().into())).await.unwrap();
+        ws.send(Message::Text(ready.to_string().into()))
+            .await
+            .unwrap();
 
         // 3. Receive 2-3 binary PCM frames, then close abruptly.
         let mut received = 0usize;
