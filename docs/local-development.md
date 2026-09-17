@@ -98,12 +98,21 @@ connect to the Pi, or replace the deployed gateway on port 18778.
 mise run tonny:local:check
 ```
 
-The check builds an isolated project with a temporary source copy and a random
-localhost port. It verifies offline image execution with networking disabled,
+The check builds isolated projects for the required Linux AMD64 and ARM64 image
+matrix, inspects every gateway, satellite, and browser-check image architecture,
+and fails if either target cannot be verified. It runs the full checks on the
+Docker daemon's native architecture. When ARM64 binfmt execution is available on
+an AMD64 daemon, it also runs an exact-PCM gateway/satellite round trip under
+emulation; a missing binfmt handler is reported explicitly and does not skip the
+required ARM64 build.
+
+The behavioral checks cover offline image execution with networking disabled,
 exact PCM round trips through the satellite container, the Python unit suites,
 Chromium microphone/WAV/error flows, and an actual Uvicorn source reload followed
-by another successful turn. Containers and temporary recordings are removed at
-the end. Your development stack keeps running.
+by another successful turn. Containers, volumes, temporary recordings, and only
+the random check projects' locally built image tags are removed even after a
+failure. Fixed `tonny-local` development images and a running development stack
+are not targeted.
 
 Chromium uses a generated microphone fixture inside the test container; physical
 mic intelligibility, speaker audibility, HAT drivers, and GPIO still need hardware

@@ -17,11 +17,15 @@ import time
 import urllib.error
 import urllib.request
 import wave
+from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[2]
 KEYS = ("TONNY_DEEPGRAM_API_KEY", "TONNY_CARTESIA_API_KEY", "TONNY_LLM_API_KEY")
+CHECK_ARCHITECTURES = ("amd64", "arm64")
+CHECK_SERVICES = ("gateway", "satellite", "browser-check")
+CHECK_PROJECT_PREFIX = "tonny-local-check-"
 
 
 def run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
@@ -30,6 +34,7 @@ def run(args: list[str], **kwargs) -> subprocess.CompletedProcess:
 
 class Stack:
     def __init__(self, project: str = "tonny-local", **environment: str):
+        self.project = project
         self.env = {**os.environ, "COMPOSE_DISABLE_ENV_FILE": "1", **environment}
         self.command = [
             "docker",
@@ -44,6 +49,43 @@ class Stack:
 
     def compose(self, *args: str, **kwargs) -> subprocess.CompletedProcess:
         return run(self.command + list(args), cwd=ROOT, env=self.env, **kwargs)
+
+    def image(self, service: str) -> str:
+        return f"{self.project}-{service}"
+
+    def cleanup(self) -> None:
+        if not self.project.startswith(CHECK_PROJECT_PREFIX):
+            raise ValueError(f"Refusing temporary cleanup for Compose project {self.project!r}.")
+
+        errors = []
+        down = self.compose(
+            "down",
+            "--remove-orphans",
+            "--volumes",
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if down.returncode:
+            detail = (down.stderr or down.stdout).strip() or f"exit {down.returncode}"
+            errors.append(f"compose down: {detail}")
+
+        images = [self.image(service) for service in CHECK_SERVICES]
+        removed = run(
+            ["docker", "image", "rm", *images],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        unexpected = [
+            line for line in removed.stderr.splitlines() if "No such image:" not in line
+        ]
+        if removed.returncode and (unexpected or not removed.stderr.strip()):
+            detail = "\n".join(unexpected).strip() or f"exit {removed.returncode}"
+            errors.append(f"image removal: {detail}")
+
+        if errors:
+            raise RuntimeError(f"Cleanup failed for {self.project}: {'; '.join(errors)}")
 
     def url(self) -> str:
         address = self.compose(
@@ -109,8 +151,183 @@ def wait_json(url: str, predicate, timeout: float = 45) -> dict:
     raise RuntimeError(f"Timed out waiting for {url}")
 
 
+def create_check_stacks(project: str, source: Path) -> dict[str, Stack]:
+    environment = {
+        "TONNY_MODE": "loopback",
+        "TONNY_LOCAL_PORT": "0",
+        "TONNY_VOICE_SOURCE": str(source),
+        **dict.fromkeys(KEYS, ""),
+    }
+    return {
+        architecture: Stack(
+            f"{project}-{architecture}",
+            DOCKER_DEFAULT_PLATFORM=f"linux/{architecture}",
+            **environment,
+        )
+        for architecture in CHECK_ARCHITECTURES
+    }
+
+
+@contextmanager
+def managed_check_stacks(stacks: tuple[Stack, ...]):
+    body_error = None
+    try:
+        yield
+    except BaseException as exc:
+        body_error = exc
+
+    cleanup_errors = []
+    for stack in reversed(stacks):
+        print(f"Cleaning temporary check project {stack.project}...", flush=True)
+        try:
+            stack.cleanup()
+        except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as exc:
+            cleanup_errors.append(str(exc))
+
+    if cleanup_errors:
+        message = "Temporary stack cleanup failed: " + " | ".join(cleanup_errors)
+        if body_error is not None:
+            raise RuntimeError(f"{body_error}; {message}") from body_error
+        raise RuntimeError(message)
+    if body_error is not None:
+        raise body_error.with_traceback(body_error.__traceback__)
+
+
+def architecture_build_commands(stack: Stack, architecture: str) -> tuple[list[str], ...]:
+    definitions = (
+        ("gateway", ROOT / "deploy/tonny/Dockerfile.voice", "gateway"),
+        ("satellite", ROOT / "deploy/tonny/Dockerfile.satellite", None),
+        ("browser-check", ROOT / "deploy/tonny/Dockerfile.voice", "browser-check"),
+    )
+    commands = []
+    for service, dockerfile, target in definitions:
+        command = [
+            "docker",
+            "buildx",
+            "build",
+            "--platform",
+            f"linux/{architecture}",
+            "--load",
+            "--file",
+            str(dockerfile),
+            "--tag",
+            stack.image(service),
+        ]
+        if target is not None:
+            command.extend(("--target", target))
+        command.append(str(ROOT))
+        commands.append(command)
+    return tuple(commands)
+
+
+def verify_architecture(stack: Stack, architecture: str) -> None:
+    platform = f"linux/{architecture}"
+    print(f"Verifying required {platform} images...", flush=True)
+    try:
+        for service, command in zip(
+            CHECK_SERVICES, architecture_build_commands(stack, architecture), strict=True
+        ):
+            phase = f"{service} build"
+            print(f"Building required {platform} {service} image...", flush=True)
+            run(command, cwd=ROOT)
+        phase = "image inspection"
+        result = run(
+            [
+                "docker",
+                "image",
+                "inspect",
+                "--format",
+                "{{.Architecture}}",
+                *(stack.image(service) for service in CHECK_SERVICES),
+            ],
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip()
+        raise RuntimeError(
+            f"Required {platform} image verification failed during {phase} "
+            f"(exit {exc.returncode}); AMD64/ARM64 verification is mandatory."
+            + (f"\n{detail}" if detail else "")
+        ) from exc
+
+    observed = result.stdout.splitlines()
+    expected = [architecture] * len(CHECK_SERVICES)
+    if observed != expected:
+        raise RuntimeError(
+            f"Required {platform} image verification failed: expected {expected}, got {observed}."
+        )
+    print(f"PASS: required {platform} images built with the expected architecture.", flush=True)
+
+
+def docker_architecture() -> str:
+    result = run(
+        ["docker", "info", "--format", "{{.Architecture}}"],
+        capture_output=True,
+        text=True,
+    )
+    reported = result.stdout.strip()
+    architecture = {"x86_64": "amd64", "aarch64": "arm64"}.get(reported, reported)
+    if architecture not in CHECK_ARCHITECTURES:
+        raise RuntimeError(f"Unsupported Docker daemon architecture: {reported or 'empty'}")
+    return architecture
+
+
+def arm64_runtime_available(stack: Stack) -> bool:
+    result = run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--platform",
+            "linux/arm64",
+            "--entrypoint",
+            "/bin/true",
+            stack.image("gateway"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return True
+    diagnostic = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+    if "exec format error" in diagnostic.lower():
+        print(
+            "SKIP: linux/arm64 runtime smoke requires binfmt; the required ARM64 image "
+            "build still passed.",
+            flush=True,
+        )
+        return False
+    raise RuntimeError(
+        f"ARM64 runtime probe failed (exit {result.returncode}) for a reason "
+        f"other than missing binfmt: {diagnostic}"
+    )
+
+
+def exact_pcm_round_trip(stack: Stack, request: Path, reply: Path, pcm: bytes) -> str:
+    stack.compose("up", "-d", "--wait", "--wait-timeout", "180", "gateway")
+    base = stack.url()
+    health = get_json(base + "/healthz")
+    assert health["mode"] == "loopback", health
+    assert not any(health["configured"].values()), health
+    stack.wav(request, reply)
+    with wave.open(str(reply), "rb") as wav:
+        assert (wav.getnchannels(), wav.getsampwidth(), wav.getframerate()) == (1, 2, 16000)
+        assert wav.readframes(wav.getnframes()) == pcm
+    health = get_json(base + "/healthz")
+    assert health["evidence_since_start"]["responses_sent"] == 1
+    assert all(
+        health["evidence_since_start"][key] == 0
+        for key in ("stt_turns", "llm_turns", "tts_turns")
+    )
+    return base
+
+
 def check() -> None:
-    project = "tonny-local-check-" + uuid4().hex[:8]
+    project = CHECK_PROJECT_PREFIX + uuid4().hex[:8]
     with tempfile.TemporaryDirectory(prefix="tonny-local-check-") as directory:
         scratch = Path(directory)
         source = scratch / "src"
@@ -119,107 +336,117 @@ def check() -> None:
             source,
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
         )
-        stack = Stack(
-            project,
-            TONNY_MODE="loopback",
-            TONNY_LOCAL_PORT="0",
-            TONNY_VOICE_SOURCE=str(source),
-            **dict.fromkeys(KEYS, ""),
-        )
-        try:
-            stack.compose("build", "gateway", "satellite", "browser-check")
-            run(
-                [
-                    "docker",
+        stacks = create_check_stacks(project, source)
+        with managed_check_stacks(tuple(stacks.values())):
+            try:
+                native = docker_architecture()
+                for architecture in CHECK_ARCHITECTURES:
+                    verify_architecture(stacks[architecture], architecture)
+
+                stack = stacks[native]
+                print(f"Checking linux/{native} image with networking disabled...", flush=True)
+                run(
+                    [
+                        "docker",
+                        "run",
+                        "--rm",
+                        "--network",
+                        "none",
+                        "--platform",
+                        f"linux/{native}",
+                        "--env",
+                        "TONNY_MODE=loopback",
+                        stack.image("gateway"),
+                        "python",
+                        "-c",
+                        "import asyncio,io,wave; from tonny_voice.app import create_app; "
+                        "app=create_app(); pcm=b'\\x01\\x00'*16000; "
+                        "reply=asyncio.run(app.state.engine.process(pcm)); "
+                        "wav=wave.open(io.BytesIO(reply.wav)); "
+                        "assert wav.readframes(wav.getnframes())==pcm; "
+                        "print('PASS: image loopback works with networking disabled.')",
+                    ]
+                )
+                pcm = b"".join(
+                    struct.pack(
+                        "<h", round(4000 * math.sin(2 * math.pi * 440 * i / 16000))
+                    )
+                    for i in range(16000)
+                )
+                request, reply = scratch / "request.wav", scratch / "reply.wav"
+                request.write_bytes(pcm_wave(pcm))
+                print(f"Checking native linux/{native} exact-PCM round trip...", flush=True)
+                base = exact_pcm_round_trip(stack, request, reply, pcm)
+                print(
+                    f"PASS: native linux/{native} gateway/satellite preserve exact PCM; "
+                    "provider activity is zero.",
+                    flush=True,
+                )
+
+                if native == "arm64":
+                    print("PASS: linux/arm64 exact-PCM smoke ran natively.", flush=True)
+                elif arm64_runtime_available(stacks["arm64"]):
+                    exact_pcm_round_trip(
+                        stacks["arm64"], request, scratch / "reply-arm64.wav", pcm
+                    )
+                    print(
+                        "PASS: linux/arm64 gateway/satellite preserve exact PCM under binfmt.",
+                        flush=True,
+                    )
+
+                print(f"Running linux/{native} satellite/tooling unit tests...", flush=True)
+                stack.compose(
                     "run",
                     "--rm",
-                    "--network",
-                    "none",
+                    "--no-deps",
+                    "-T",
+                    "--volume",
+                    f"{Path(__file__).resolve()}:/tmp/tonny/deploy/tonny/local.py:ro",
                     "--env",
-                    "TONNY_MODE=loopback",
-                    f"{project}-gateway",
+                    "TONNY_LOCAL_SCRIPT=/tmp/tonny/deploy/tonny/local.py",
+                    "--entrypoint",
                     "python",
-                    "-c",
-                    "import asyncio,io,wave; from tonny_voice.app import create_app; "
-                    "app=create_app(); pcm=b'\\x01\\x00'*16000; "
-                    "reply=asyncio.run(app.state.engine.process(pcm)); "
-                    "wav=wave.open(io.BytesIO(reply.wav)); "
-                    "assert wav.readframes(wav.getnframes())==pcm; "
-                    "print('PASS: image loopback works with networking disabled.')",
-                ]
-            )
-            stack.compose("up", "-d", "--wait", "--wait-timeout", "180", "gateway")
-            base = stack.url()
-            health = get_json(base + "/healthz")
-            assert health["mode"] == "loopback", health
-            assert not any(health["configured"].values()), health
-            pcm = b"".join(
-                struct.pack("<h", round(4000 * math.sin(2 * math.pi * 440 * i / 16000)))
-                for i in range(16000)
-            )
-            request, reply = scratch / "request.wav", scratch / "reply.wav"
-            request.write_bytes(pcm_wave(pcm))
-            stack.wav(request, reply)
-            with wave.open(str(reply), "rb") as wav:
-                assert (wav.getnchannels(), wav.getsampwidth(), wav.getframerate()) == (
-                    1,
-                    2,
-                    16000,
+                    "satellite",
+                    "-m",
+                    "unittest",
+                    "discover",
+                    "-s",
+                    "tests",
+                    "-v",
                 )
-                assert wav.readframes(wav.getnframes()) == pcm
-            health = get_json(base + "/healthz")
-            assert health["evidence_since_start"]["responses_sent"] == 1
-            assert all(
-                health["evidence_since_start"][k] == 0
-                for k in ("stt_turns", "llm_turns", "tts_turns")
-            )
-            print(
-                "PASS: container satellite preserves PCM; provider activity is zero.",
-                flush=True,
-            )
-            stack.compose(
-                "run",
-                "--rm",
-                "--no-deps",
-                "-T",
-                "--entrypoint",
-                "python",
-                "satellite",
-                "-m",
-                "unittest",
-                "discover",
-                "-s",
-                "tests",
-                "-v",
-            )
-            stack.compose("run", "--rm", "--no-deps", "-T", "browser-check")
+                print(f"Running linux/{native} gateway/browser tests...", flush=True)
+                stack.compose("run", "--rm", "--no-deps", "-T", "browser-check")
 
-            # Edit only this check's temporary source tree to prove an actual worker reload.
-            probe = uuid4().hex
-            app_source = source / "tonny_voice/app.py"
-            with app_source.open("a") as file:
-                file.write(
-                    "\n_original_create_app = create_app\n"
-                    "def create_app(*args, **kwargs):\n"
-                    "    app = _original_create_app(*args, **kwargs)\n"
-                    "    @app.get('/__reload_probe')\n"
-                    "    async def reload_probe():\n"
-                    f"        return {{'probe': '{probe}'}}\n"
-                    "    return app\n"
+                # Edit only this check's temporary source tree to prove an actual worker reload.
+                print(f"Checking linux/{native} source reload and subsequent turn...", flush=True)
+                probe = uuid4().hex
+                app_source = source / "tonny_voice/app.py"
+                with app_source.open("a") as file:
+                    file.write(
+                        "\n_original_create_app = create_app\n"
+                        "def create_app(*args, **kwargs):\n"
+                        "    app = _original_create_app(*args, **kwargs)\n"
+                        "    @app.get('/__reload_probe')\n"
+                        "    async def reload_probe():\n"
+                        f"        return {{'probe': '{probe}'}}\n"
+                        "    return app\n"
+                    )
+                wait_json(base + "/__reload_probe", lambda data: data.get("probe") == probe)
+                assert (
+                    get_json(base + "/healthz")["evidence_since_start"]["responses_sent"] == 0
                 )
-            wait_json(base + "/__reload_probe", lambda data: data.get("probe") == probe)
-            assert get_json(base + "/healthz")["evidence_since_start"]["responses_sent"] == 0
-            stack.wav(request, reply)
-            print(
-                "PASS: source reload restarts the worker and the next turn succeeds.",
-                flush=True,
-            )
-        except BaseException:
-            stack.compose("logs", "--no-color", "--tail", "60", "gateway", check=False)
-            raise
-        finally:
-            stack.compose("down", "--remove-orphans", "--volumes")
-    print("Local container checks passed; isolated test stack removed.", flush=True)
+                stack.wav(request, reply)
+                print(
+                    "PASS: source reload restarts the worker and the next turn succeeds.",
+                    flush=True,
+                )
+            except BaseException:
+                for failed_stack in stacks.values():
+                    failed_stack.compose(
+                        "logs", "--no-color", "--tail", "60", "gateway", check=False
+                    )
+                raise
+    print("Local container checks passed; isolated test stacks and images removed.", flush=True)
 
 
 def up(live: bool) -> None:
