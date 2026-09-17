@@ -1,5 +1,19 @@
 {
   "project_name": "HeyMa Satellite",
-  "project_description": "He\u0027s Tonny",
-  "project_slug": "tonnybox"
+  "project_description": "He's Tonny",
+  "project_slug": "tonnybox",
+  "ticket_provider": {
+    "type": "plane",
+    "workspace": "33god",
+    "identifier": "TONNY",
+    "board_id": "7e2557f9-861f-4cc7-8929-9b7f514c7fc3",
+    "state": "linked"
+  },
+  "repo_path": "/home/delorenj/code/TonnyBox",
+  "agents": {
+    "tonnybox-pm": {
+      "role": "pm",
+      "role_dir": "agents/hermes/pm"
+    }
+  }
 }
