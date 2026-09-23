@@ -18,15 +18,16 @@ profile: tonnybox-pm
 
 # Telegram bot identity (one bot per agent — see docs/architecture.md).
 telegram:
+  provisioning_status: "deferred"
   bot_username: "TonnyBoxPMBot"
+  bot_id: ""
 # Ticket-provider binding (linear | plane | trello).
 # The Scrum Master sentinel talks ONLY to this via .scripts/lib/ticket-provider.sh;
 # swapping providers is a one-line change here. Filled in by 42-ticket-provider.sh.
 ticket_provider:
   name: plane
-  board_id: "b9016a74-0aec-452d-8271-d53e9755c59d"
-  board_url: "https://plane.delo.sh/33god/projects/b9016a74-0aec-452d-8271-d53e97\
-    55c59d/issues/"
+  board_id: "7e2557f9-861f-4cc7-8929-9b7f514c7fc3"
+  board_url: "https://plane.delo.sh/33god/projects/7e2557f9-861f-4cc7-8929-9b7f514c7fc3/issues/"
   workspace: ""
   project: "" # Plane project uuid (set by 42-ticket-provider.sh)
   # Normalized-state -> Plane lane names. REQUIRED, not optional: the
@@ -79,5 +80,5 @@ reconcile:
   explicit_opt_out: false
 
 service_state:
-  heartbeat: "active"
+  heartbeat: "retired"
   gateway: "deferred"
