@@ -1,7 +1,6 @@
 {
   "project_name": "HeyMa Satellite",
   "project_description": "He's Tonny",
-  "project_slug": "tonnybox",
   "ticket_provider": {
     "type": "plane",
     "workspace": "33god",
@@ -15,5 +14,6 @@
       "role": "pm",
       "role_dir": "agents/hermes/pm"
     }
-  }
+  },
+  "project_id": "tonnybox"
 }
