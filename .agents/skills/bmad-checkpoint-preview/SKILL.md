@@ -1,29 +1,21 @@
 ---
 name: bmad-checkpoint-preview
-description: 'LLM-assisted human-in-the-loop review. Make sense of a change, focus attention where it matters, test. Use when the user says "checkpoint", "human review", or "walk me through this change".'
+description: "Deprecated: forwards to bmad-walkthrough. Do not use unless invoked by name"
+metadata:
+  lifecycle: shim
 ---
 
-# Checkpoint Review Workflow
+# Deprecated Walkthrough Alias
 
-**Goal:** Guide a human through reviewing a change — from purpose and context into details.
+## On Activation
 
-You are assisting the user in reviewing a change.
-
-## Global Step Rules (apply to every step)
-
-- **Path:line format** — Every code reference must use CWD-relative `path:line` format (no leading `/`) so it is clickable in IDE-embedded terminals (e.g., `src/auth/middleware.ts:42`).
-- **Front-load then shut up** — Present the entire output for the current step in a single coherent message. Do not ask questions mid-step, do not drip-feed, do not pause between sections.
-- **Language** — Speak in `{communication_language}`. Write any file output in `{document_output_language}`.
-
-## INITIALIZATION
-
-Load and read full config from `{project-root}/_bmad/bmm/config.yaml` and resolve:
-
-- `implementation_artifacts`
-- `planning_artifacts`
-- `communication_language`
-- `document_output_language`
-
-## FIRST STEP
-
-Read fully and follow `./step-01-orientation.md` to begin.
+1. Check whether either legacy customization file exists:
+   - `{project-root}/_bmad/custom/bmad-checkpoint-preview.toml`
+   - `{project-root}/_bmad/custom/bmad-checkpoint-preview.user.toml`
+2. If neither legacy file exists, output exactly `bmad-checkpoint-preview is deprecated. Redirecting to bmad-walkthrough. Please use bmad-walkthrough in the future.`, invoke `bmad-walkthrough` exactly once with the user's original input verbatim, then execute no further steps in this shim.
+3. For every legacy file that exists, use its matching new filename:
+   - `{project-root}/_bmad/custom/bmad-checkpoint-preview.toml` becomes `{project-root}/_bmad/custom/bmad-walkthrough.toml`.
+   - `{project-root}/_bmad/custom/bmad-checkpoint-preview.user.toml` becomes `{project-root}/_bmad/custom/bmad-walkthrough.user.toml`.
+4. If the matching new file does not exist, tell the user that the customization file uses the deprecated name and offer to rename it. Rename it only after explicit approval. If approval is declined or unavailable, or the rename fails, HALT and do not invoke any skill.
+5. If the matching new file already exists, do not overwrite it. Read both files, explain their differences, and propose the exact content for the new file. Resolve conflicting values with the user. Only after the user explicitly approves that content, save and verify the new file, then remove the legacy file. If approval is declined or unavailable, or any operation fails, HALT and do not invoke any skill.
+6. After every detected legacy file has been migrated successfully and no legacy file remains, output exactly `bmad-checkpoint-preview is deprecated. Redirecting to bmad-walkthrough. Please use bmad-walkthrough in the future.`, invoke `bmad-walkthrough` exactly once with the user's original input verbatim, then execute no further steps in this shim.

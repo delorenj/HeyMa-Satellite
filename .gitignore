@@ -5,3 +5,13 @@ node_modules
 *.mp3
 *.zip
 *.aab
+
+# Secrets — .env is materialized from .env.op by `op inject` on mise enter,
+# staged through a mktemp file and moved into place only on success.
+# NEVER commit it. .env.op holds only 1Password references or safe literals and IS committed.
+.env
+.env.*
+!.env.op
+
+# Canonical agent config lives in .agents; generated skill projections stay local.
+/.agents/skills
