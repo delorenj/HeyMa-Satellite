@@ -12,38 +12,53 @@
 
 [fleet]
 # Absolute path to the shared Hermes executable every agent launcher execs.
-hermes_bin = "/home/delorenj/code/hermes-agent/.venv/bin/hermes"
-# Checkout of the hermes-agent repo. Its .venv is used to install nats-py, etc.
-hermes_repo = "/home/delorenj/code/hermes-agent"
+hermes_bin = "~/.local/share/hermes-agent/releases/0408fec7a153e6c32c064acd2b8053917f1525f1/.venv/bin/hermes"
+# Checkout of the shared hermes-agent repo.
+hermes_repo = "~/.local/share/hermes-agent/releases/0408fec7a153e6c32c064acd2b8053917f1525f1"
+# The workforce CLI. Runtime provisioning delegates named profile topology to
+# this command; it never rewrites profile links itself.
+flume_bin = "flume"
+# Deprecated alias for flume_bin, read only so that role directories rendered
+# before the split keep resolving. Set both to the same value.
+pjangler_bin = "flume"
+# Reviewed fleet runtime publication. Provisioning metadata and clean installs
+# must agree on this fork/ref/SHA; do not substitute upstream main.
+hermes_git_url = "https://github.com/delorenj/hermes-agent.git"
+hermes_git_ref = "main"
+hermes_git_sha = "0408fec7a153e6c32c064acd2b8053917f1525f1"
 # Fallback runtime scaffold dir — used only when an agent's vendored
 # ./.runtime-scaffold is missing.
-runtime_scaffold_dir = "/home/delorenj/code/hermes-agent-template/runtime-scaffold"
+runtime_scaffold_dir = "~/code/hermes-agent-template/runtime-scaffold"
 # Shared fleet source-of-truth env file + fleet registry. ~ is expanded.
 fleet_env = "~/.hermes/fleet.env"
 registry_file = "~/.hermes/agents-registry.yaml"
-# Canonical external skills dir mirrored into each agent profile.
-canonical_skills_dir = "/home/delorenj/.agents/skills"
-# Skills symlinked into every agent's runtime skills root.
-symlinked_runtime_skills = [
-  "delonet-conventions",
-  "delonet-dotenv",
-  "hermes-pm-template-maintenance",
-  "hindsight",
-  "subagent-driven-development",
-]
+# Shared auth roots. HERMES_OAUTH_FILE is the Hermes provider OAuth store
+# (including openai-codex); CODEX_HOME is for Codex CLI/app-server auth.
+oauth_file = "~/.hermes/auth.json"
+codex_home = "~/.codex"
+# Skill selection lives in global/project .agents/skills.json. Step 10 uses
+# pinned Skillex profile sync; no external projection path is configured here.
+# Optional Vox plugin + service defaults for Hermes PM agents.
+vox_plugin_name = "vox"
+vox_plugin_dir = "~/code/voxxy/plugins/tts/vox"
+vox_voice = "carlin"
+vox_url = "https://vox.delo.sh"
+# Channel credentials are written directly to Password items in this vault;
+# only op:// references are recorded in named-profile config.delta.yaml.
+onepassword_vault = "DeLoSecrets"
+onepassword_item_prefix = "hermes-agent"
+# Canonical PM config.yaml the provisioner seeds each runtime's config.yaml from.
+# This is the fleet-wide Hermes inference/skill config (model, toolsets, etc.)
+# every agent runtime starts from. ~ is expanded.
+# canonical_pm_config = "~/.hermes/config.yaml"
 
 [github]
-# Owner of the per-agent runtime repos (creates <owner>/agent-hm-<repo>-<role>).
-runtime_repo_owner = "delorenj"
+# LEGACY INERT COMPATIBILITY METADATA ONLY. Older role manifests may still
+# carry this owner field. Current provisioning does not create, attach,
+# synchronize, restore, archive, or remove runtime storage from this value.
+runtime_repo_owner = ""
 
 [plane]
 # Plane instance base URL and workspace slug (one project per agent).
 base = "https://plane.delo.sh"
 workspace = "33god"
-
-[bloodbank]
-# NATS endpoint the consumer connects to.
-nats_host = "127.0.0.1"
-nats_port = 4222
-# Where the bloodbank docker compose lives (used only for a hint message). ~ ok.
-compose_dir = "~/code/33GOD/bloodbank"

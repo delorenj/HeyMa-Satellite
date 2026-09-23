@@ -1,133 +1,204 @@
 #!/usr/bin/env bash
-# Create the per-agent runtime GitHub repo, init from scaffold, submodule it.
+# Provision the per-agent, pure-local Hermes runtime without creating a Git
+# repository or a project submodule. Runtime durability belongs to Hindsight;
+# this directory may contain secrets and mutable agent state (PJAN-41).
 # shellcheck source=_lib.sh
 source "$(dirname "$0")/_lib.sh"
 load_role_env
 
-already_done 20-runtime-repo && { log "[20] runtime repo already set up — skipping"; exit 0; }
-[[ "${SKIP_RUNTIME_REPO:-0}" == "1" ]] && { log "[20] runtime repo — SKIPPED (SKIP_RUNTIME_REPO=1)"; mark_done 20-runtime-repo; exit 0; }
+already_done 20-runtime-repo \
+  && log "[20] local runtime scaffold already set up — re-auditing singleton profile wiring"
+if [[ "${SKIP_RUNTIME_REPO:-0}" == "1" ]]; then
+  clear_done 20-runtime-repo
+  log "[20] local runtime — DEFERRED (SKIP_RUNTIME_REPO=1; completion marker cleared)"
+  exit 0
+fi
 
 PROFILE_HOME="$HOME/.hermes/profiles/$PROFILE_NAME"
 RUNTIME_LOCAL="$ROLE_DIR/runtime"
-GH_OWNER="${RUNTIME_REPO%%/*}"
-GH_NAME="${RUNTIME_REPO##*/}"
+PROJECT_PATH="$(project_repo_path)" || die "no project git root"
+REL_ROLE_PATH="$(realpath --relative-to="$PROJECT_PATH" "$ROLE_DIR")"
+REL_RUNTIME_PATH="${REL_ROLE_PATH}/runtime"
 
-log "[20] runtime repo: gh:$RUNTIME_REPO"
+log "[20] local runtime: $RUNTIME_LOCAL"
 
-# 1. Create the GitHub repo (private) if it doesn't exist
-if gh repo view "$RUNTIME_REPO" >/dev/null 2>&1; then
-  log "    GH repo exists; reusing"
-else
-  log "    creating GH repo (private)"
-  gh repo create "$RUNTIME_REPO" --private \
-    --description "Hermes runtime (HERMES_HOME) for $AGENT_ID — auto-checkpointed memory + state" \
-    --disable-issues --disable-wiki >/dev/null
+# Fail closed if an older installation still models runtime as a project
+# submodule. `flume remediate` performs the non-destructive index transition;
+# this provisioner never removes or rewrites an existing nested repository.
+if git -C "$PROJECT_PATH" ls-files --stage -- "$REL_RUNTIME_PATH" | grep -q '^160000 '; then
+  die "$REL_RUNTIME_PATH is still a tracked gitlink; run 'flume remediate hermes.untracked-runtimes' before provisioning"
+fi
+if [[ -f "$PROJECT_PATH/.gitmodules" ]] &&
+   git -C "$PROJECT_PATH" config -f .gitmodules --get-regexp '^submodule\..*\.path$' 2>/dev/null |
+     awk -v expected="$REL_RUNTIME_PATH" '$2 == expected { found=1 } END { exit !found }'; then
+  die "$REL_RUNTIME_PATH still has a stale .gitmodules mapping; run 'flume remediate hermes.untracked-runtimes' before provisioning"
 fi
 
-REMOTE_URL=$(gh repo view "$RUNTIME_REPO" --json sshUrl -q .sshUrl)
-
-# 2. Check if remote already has commits — if so, skip the scaffold push.
-#    This makes the step idempotent across failed-run retries.
-if git ls-remote --heads "$REMOTE_URL" 2>/dev/null | grep -q refs/heads; then
-  log "    remote already has commits — skipping scaffold push"
-  REMOTE_HAS_CONTENT=1
-else
-  REMOTE_HAS_CONTENT=0
+mkdir -p "$RUNTIME_LOCAL"
+if [[ -e "$RUNTIME_LOCAL/.git" ]]; then
+  warn "    existing nested runtime repository preserved; no fetch, commit, or push will be attempted"
 fi
 
-# 2a. Stage the runtime scaffold into a tmp dir (only if remote is empty)
-TMP=$(mktemp -d)
-log "    populating scaffold in $TMP"
+# Render the scaffold in a temporary directory, then copy only missing paths.
+# Existing memory, configuration, credentials, and sessions always win.
+TMP="$(mktemp -d)"
+cleanup() { rm -rf -- "$TMP"; }
+trap cleanup EXIT
 cp -a "$RUNTIME_SCAFFOLD_DIR/." "$TMP/"
-
-# Render scaffold templates with role-specific values
 python3 - "$TMP" "$AGENT_ID" "$REPO" "$ROLE" "$DISPLAY_NAME" <<'PYEOF'
-import sys, pathlib, re
+import pathlib
+import sys
+
 root, agent_id, repo, role, display = sys.argv[1:6]
 root = pathlib.Path(root)
 mapping = {
-    "{{agent_id}}": agent_id, "{{repo}}": repo, "{{role}}": role,
+    "{{agent_id}}": agent_id,
+    "{{repo}}": repo,
+    "{{role}}": role,
     "{{display_name}}": display,
 }
-for p in root.rglob("*"):
-    if p.is_file() and p.suffix in (".md", ".yaml", ".yml", ".sh", ".py", ".gitignore", ".gitattributes"):
+for path in root.rglob("*"):
+    if path.is_file() and path.suffix in (".md", ".yaml", ".yml", ".sh", ".py", ".gitignore", ".gitattributes"):
         try:
-            t = p.read_text()
-            for k, v in mapping.items(): t = t.replace(k, v)
-            p.write_text(t)
+            text = path.read_text()
+            for source, target in mapping.items():
+                text = text.replace(source, target)
+            path.write_text(text)
         except UnicodeDecodeError:
             pass
 PYEOF
+# Never let a literal secret reach the runtime. The scaffold is rendered from
+# templates, so a leaked credential shows up here before anything is copied.
+python3 "$(dirname "$0")/secret-scan.py" "$TMP"
+python3 - "$TMP" "$RUNTIME_LOCAL" <<'PYEOF'
+import os, pathlib, shutil, sys
 
-# 3. Copy current global config.yaml so the agent inherits provider/skills.
-if [[ -f "$HOME/.hermes/config.yaml" ]]; then
-  cp "$HOME/.hermes/config.yaml" "$TMP/config.yaml"
-fi
-# Copy the project's SOUL.md as the canonical starting personality.
-cp "$ROLE_DIR/SOUL.md" "$TMP/SOUL.md"
+source = pathlib.Path(sys.argv[1])
+target = pathlib.Path(sys.argv[2])
+for current in sorted(source.rglob("*")):
+    relative = current.relative_to(source)
+    destination = target / relative
+    if current.is_dir():
+        destination.mkdir(parents=True, exist_ok=True)
+        continue
+    if os.path.lexists(destination):
+        continue
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if current.is_symlink():
+        destination.symlink_to(os.readlink(current))
+    else:
+        shutil.copy2(current, destination, follow_symlinks=False)
+PYEOF
 
-# 4. Git init + LFS + initial commit + push (skip if remote already has content)
-if [[ "$REMOTE_HAS_CONTENT" == "0" ]]; then
-  (
-    cd "$TMP"
-    git init -b main >/dev/null
-    git lfs install --local >/dev/null 2>&1 || warn "git-lfs not installed; sessions.db will commit as raw binary"
-    git lfs track "*.db" >/dev/null 2>&1 || true
-    git lfs track "*.sqlite" >/dev/null 2>&1 || true
-    git add -A
-    git -c commit.gpgsign=false commit -m "Initial scaffold for $AGENT_ID" >/dev/null
-    git remote add origin "$REMOTE_URL"
-    git push -u origin main 2>&1 | tail -3
-  )
-fi
-
-# 5. Submodule-add into the role dir
-PROJECT_PATH="$(project_repo_path)" || die "no project git root"
-# Compute relative path from the ROLE dir (which exists), then append /runtime
-REL_ROLE_PATH="$(realpath --relative-to="$PROJECT_PATH" "$ROLE_DIR")"
-REL_SUBMODULE_PATH="${REL_ROLE_PATH}/runtime"
-log "    adding submodule at $REL_SUBMODULE_PATH"
-
-# Idempotent: if the submodule is already registered, just update it.
-# This handles re-runs where the .done marker was cleared or copier
-# --overwrite regenerated the scripts.
-SUBMODULE_ALREADY_REGISTERED=0
-if git -C "$PROJECT_PATH" submodule status "$REL_SUBMODULE_PATH" >/dev/null 2>&1; then
-  SUBMODULE_ALREADY_REGISTERED=1
-fi
-
-if [[ "$SUBMODULE_ALREADY_REGISTERED" == "1" ]]; then
-  log "    submodule already registered — updating"
-  (
-    cd "$PROJECT_PATH"
-    # If the local dir is missing (e.g. previous rm -rf), re-init it
-    if [[ ! -d "$REL_SUBMODULE_PATH/.git" ]]; then
-      git submodule update --init "$REL_SUBMODULE_PATH" 2>&1 | tail -3
-    fi
-  )
+# Seed mutable identity/config only when no local value exists.
+if [[ "$ROLE" == "reporter" ]]; then
+  # Generate a delta-only runtime config for least-privilege reporters. Never copy the shared PM
+  # config: it may carry dashboard credentials, write-capable MCPs, or broad tools.
+  MODEL_PROVIDER="$(yaml_get model.provider)"
+  MODEL_NAME="$(yaml_get model.name)"
+  if [[ ! -e "$RUNTIME_LOCAL/config.yaml" ]]; then
+    python3 - "$RUNTIME_LOCAL/config.yaml" "$PROJECT_PATH" "${HERMES_TIMEZONE:-America/New_York}" \
+      "$MODEL_PROVIDER" "$MODEL_NAME" "$ROLE" <<'PYEOF'
+import json, pathlib, re, sys
+path, cwd, timezone, provider, model, role = sys.argv[1:7]
+if not re.fullmatch(r"[A-Za-z_]+(?:/[A-Za-z_]+)*", timezone):
+    raise SystemExit("unsafe timezone")
+config = {
+    "timezone": timezone,
+    "terminal": {"cwd": cwd},
+    # The named profile owns its real skills overlay, reconciled in step 10.
+    "skills": {"external_dirs": []},
+}
+if provider or model:
+    config["model"] = {}
+    if provider:
+        config["model"]["provider"] = provider
+    if model:
+        config["model"]["default"] = model
+config["platform_toolsets"] = {
+    "cli": ["web", "delegation", "no_mcp"],
+    "cron": ["web", "delegation", "no_mcp"],
+}
+config["agent"] = {
+    "disabled_toolsets": [
+        "browser", "terminal", "file", "code_execution", "cronjob",
+        "kanban", "homeassistant", "computer_use", "project", "skills",
+    ]
+}
+config["delegation"] = {"max_spawn_depth": 1, "inherit_mcp_toolsets": False}
+pathlib.Path(path).write_text(json.dumps(config, indent=2) + "\n")
+PYEOF
+  fi
+  if [[ ! -e "$RUNTIME_LOCAL/profile.yaml" ]]; then
+    cat > "$RUNTIME_LOCAL/profile.yaml" <<'YAML'
+config:
+  inherit_from: default
+  save_mode: delta
+YAML
+  fi
 else
-  # Clean any leftover untracked directory before adding
-  rm -rf "$RUNTIME_LOCAL"
-  (
-    cd "$PROJECT_PATH"
-    git submodule add "$REMOTE_URL" "$REL_SUBMODULE_PATH" 2>&1 | tail -3
-  )
+  CANONICAL_PM_CONFIG="$(config_get fleet.canonical_pm_config "$HOME/.hermes/config.yaml")"
+  if [[ -f "$CANONICAL_PM_CONFIG" && ! -e "$RUNTIME_LOCAL/config.yaml" ]]; then
+    cp "$CANONICAL_PM_CONFIG" "$RUNTIME_LOCAL/config.yaml"
+  fi
+fi
+if [[ ! -e "$RUNTIME_LOCAL/SOUL.md" ]]; then
+  cp "$ROLE_DIR/SOUL.md" "$RUNTIME_LOCAL/SOUL.md"
 fi
 
-# 6. Symlink the runtime back into ~/.hermes/profiles/<name>/ so hermes finds it.
-# Actually we WANT HERMES_HOME = the runtime dir, not the cloned profile.
-# Move the profile contents into runtime, then symlink the profile dir to runtime.
-PROFILE_HOME="$HOME/.hermes/profiles/$PROFILE_NAME"
-if [[ -d "$PROFILE_HOME" && ! -L "$PROFILE_HOME" ]]; then
-  log "    migrating profile state into the runtime submodule"
-  # Preserve any keys/state hermes profile create left
-  for f in auth.json auth.lock .env config.yaml; do
-    [[ -f "$PROFILE_HOME/$f" && ! -e "$RUNTIME_LOCAL/$f" ]] && cp "$PROFILE_HOME/$f" "$RUNTIME_LOCAL/$f"
-  done
-  rm -rf "$PROFILE_HOME"
-  ln -sfn "$RUNTIME_LOCAL" "$PROFILE_HOME"
-  log "    $PROFILE_HOME -> $RUNTIME_LOCAL"
+# Named-profile topology belongs exclusively to Flume. Preview first, then apply
+# the one idempotent rule. This script never removes or replaces a real profile
+# directory and never creates the obsolete profile -> runtime symlink.
+#
+# The subcommand stays `migrate`, and that is a FROZEN compatibility argv, not an
+# oversight: Flume's verb is `remediate` and keeps `migrate` as an alias
+# precisely so the copies of this script already sitting in 74 role directories
+# keep working after the rename.
+if [[ "$FLUME_BIN" != */* ]]; then
+  FLUME_BIN="$(command -v "$FLUME_BIN" 2>/dev/null || true)"
+fi
+[[ -n "$FLUME_BIN" && -x "$FLUME_BIN" ]] \
+  || die "Flume CLI not found; install 'flume' or set FLUME_BIN"
+"$FLUME_BIN" migrate hermes.runtime-singleton "$PROJECT_PATH" --dry-run --json >/dev/null \
+  || die "singleton-runtime audit failed; profile was left untouched"
+"$FLUME_BIN" migrate hermes.runtime-singleton "$PROJECT_PATH" --json >/dev/null \
+  || die "singleton-runtime migration failed; inspect with: flume remediate hermes.runtime-singleton '$PROJECT_PATH' --dry-run"
+[[ -d "$PROFILE_HOME" && ! -L "$PROFILE_HOME" ]] \
+  || die "Flume did not establish a real named profile at $PROFILE_HOME"
+log "    singleton profile verified by flume remediate hermes.runtime-singleton: $PROFILE_HOME"
+
+# Never persist a project-specific terminal.cwd through the named profile.
+# config.yaml is fleet-shared in the singleton topology.  The manual and
+# service launchers pass TERMINAL_CWD process-locally for this role instead.
+
+if [[ "$ROLE" == "pm" ]]; then
+  VOX_PLUGIN_NAME="${VOX_PLUGIN_NAME:-$(config_get fleet.vox_plugin_name 'vox')}"
+  VOX_VOICE="${VOX_VOICE:-$(config_get fleet.vox_voice 'carlin')}"
+  VOX_PLUGIN_DIR="${VOX_PLUGIN_DIR:-$(config_get fleet.vox_plugin_dir "$HOME/code/voxxy/plugins/tts/$VOX_PLUGIN_NAME")}"
+  if [[ -d "$VOX_PLUGIN_DIR" ]]; then
+    mkdir -p "$PROFILE_HOME/plugins/tts"
+    ln -sfn "$VOX_PLUGIN_DIR" "$PROFILE_HOME/plugins/tts/$VOX_PLUGIN_NAME"
+    profile_voice_contract_set "$PROFILE_HOME" "$VOX_PLUGIN_NAME" "$VOX_VOICE" \
+      || die "could not write the canonical PM voice contract to config.delta.yaml"
+    python3 - "$PROFILE_HOME/config.yaml" "$VOX_PLUGIN_NAME" "$VOX_VOICE" <<'PYEOF' \
+      || die "PM voice config is not the canonical vox/carlin contract"
+import pathlib, sys
+try:
+    import yaml
+except ImportError:
+    raise SystemExit("PyYAML is required to validate PM voice config")
+config = yaml.safe_load(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")) or {}
+plugin, voice = sys.argv[2:4]
+enabled = ((config.get("plugins") or {}).get("enabled") or [])
+tts = config.get("tts") or {}
+actual_voice = ((tts.get(plugin) or {}).get("voice") or tts.get("voice") or "")
+if f"tts/{plugin}" not in enabled or tts.get("provider") != plugin or actual_voice != voice:
+    raise SystemExit(1)
+PYEOF
+    log "    PM voice verified: provider=$VOX_PLUGIN_NAME voice=$VOX_VOICE"
+  else
+    log "    optional Vox plugin not installed; PM voice activation deferred"
+  fi
 fi
 
-rm -rf "$TMP"
 mark_done 20-runtime-repo
