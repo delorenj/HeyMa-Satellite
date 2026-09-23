@@ -49,7 +49,7 @@ plane:
   # Empty -> resolved from ~/.config/hermes-agent-template/config.toml [plane].workspace
   workspace: ""
   # identifier is set by .scripts/42-ticket-provider.sh after creation (plane only)
-  identifier: "TONPM"
+  identifier: "TONNY"
 # Bloodbank wiring (consumed + produced subjects).
 bloodbank:
   subscribe:
