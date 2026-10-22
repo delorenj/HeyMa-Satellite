@@ -15,5 +15,13 @@
       "role_dir": "agents/hermes/pm"
     }
   },
-  "project_id": "tonnybox"
+  "project_id": "tonnybox",
+  "bmad": {
+    "companion": {
+      "adapter": {
+        "module": "./.agents/skills/g33-33god-integration/scripts/g33_pjangler_bridge.mjs",
+        "exportName": "g33Companion"
+      }
+    }
+  }
 }
