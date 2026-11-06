@@ -4,9 +4,13 @@ Status: Scrum Master engine protocol (provider-agnostic)
 
 ## Invariant
 
-If a ready ticket exists, exactly one implementation worker must be actively
-moving it, or the Scrum Master records why none can. Prefer one live thread over
-a quiet backlog. WIP limit: one active worker ticket.
+Every ready ticket gets its own implementation worker at the same time — there
+is no default cap on tickets in progress. For each ready ticket, exactly one
+worker (one owner) moves it: never double-dispatch a ticket or duplicate another
+owner's work, and sequence tickets whose file scopes clearly collide with a
+`--blocks` relation rather than running them blind in parallel. A worker active
+on another ticket never blocks dispatching a different ready ticket. For each
+active ticket, the Scrum Master records state, or records why none can move.
 
 The Scrum Master owns the watch loop. Workers (codex, opencode, copilot, …) own
 implementation. The Scrum Master clears review-lane work via the autonomous

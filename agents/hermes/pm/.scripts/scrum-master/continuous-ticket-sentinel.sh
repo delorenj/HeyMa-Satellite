@@ -105,22 +105,9 @@ if status in {"blocked","stalled","error"}:
         or iso_epoch(state.get("last_runner_completed_at")) or iso_epoch(state.get("updated_at")))
     if last_blocked_run and (now - last_blocked_run) < blocked_full_run_cooldown:
         print("skip:blocker-cooldown"); raise SystemExit(0)
-if status in {"active","delegated","working"} and session:
-    process_active = False
-    try:
-        result = subprocess.run(["ps","-u",str(__import__("os").getuid()),"-o","pid=,command="],
-            check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
-        markers = ("codex exec","opencode run","auggie","gemini","kimi","copilot")
-        process_active = any(((session and session in line) or (worktree and worktree in line))
-            and any(m in line for m in markers) for line in result.stdout.splitlines())
-    except Exception: process_active = False
-    log_path = Path.home()/".local"/"state"/"zellij"/"sessions"/session/"zellij.log"
-    log_recent = log_path.exists() and (now - log_path.stat().st_mtime) <= active_max_idle
-    marker_recent = False
-    last_activity = iso_epoch(state.get("last_activity_at")) or iso_epoch(state.get("updated_at"))
-    if last_activity: marker_recent = (now - last_activity) <= active_max_idle
-    if process_active and (log_recent or marker_recent):
-        print("skip:active-worker"); raise SystemExit(0)
+# WIP=1 gate removed (owner directive 2026-11-05): a healthy worker on one
+# ticket no longer skips this pass. Workers run in parallel, one owner per
+# ticket; only the cooldowns below throttle passes.
 last_full_run = float(state.get("last_full_run_epoch") or 0)
 if last_full_run and (now - last_full_run) < full_run_cooldown: print("skip:cooldown")
 else: print("run:full")

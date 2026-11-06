@@ -34,10 +34,13 @@ on Linear, Plane, or Trello.
 2. Reconcile: active milestone (`tp active_milestone`), issues (`tp list_issues`),
    local evidence under `_bmad-output/implementation-artifacts/issue-evidence/`,
    and live worker state (zellij sessions, worktrees, git).
-3. If one worker ticket is `started` and healthy, monitor it and record state.
-4. If no worker is active and a ready unblocked issue exists, delegate exactly
-   one worker (see the orchestration doc), move the issue to `started`, and
-   create/refresh its evidence file. Do not self-accept review here.
+3. For every `started` ticket with a healthy worker, monitor it and record
+   state.
+4. For every ready unblocked issue that has no active worker, delegate a
+   worker for it (one owner per ticket; see the orchestration doc), move the
+   issue to `started`, and create/refresh its evidence file. Workers run in
+   parallel — a worker on another ticket never blocks a dispatch. Do not
+   self-accept review here.
 5. **Independent adversarial review — a NORMAL per-pass action.** For any
    `in_review` ticket whose evidence is complete and for which an independent
    reviewer exists (a reviewer agent id NOT equal to the implementer recorded in
