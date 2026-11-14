@@ -55,7 +55,7 @@ DEFAULT_TONNY_ERROR_REPLY = "Transcript saved. Tonny timed out before answering.
 DEFAULT_ROUTER_ERROR_REPLY = "I heard you, but the Tonny operator router is not responding."
 DEFAULT_TRANSCRIBE_COMMAND = (
     "env TRANSCRIPTS={transcript_dir} "
-    "/home/delorenj/code/HeyMa/bin/transcribe {audio_path} --device cpu --output {transcript_path}"
+    "/home/delorenj/HeyMa/bin/transcribe {audio_path} --device cpu --output {transcript_path}"
 )
 WAKEWORD_RE = re.compile(r"\bhey[\s,.:;!?-]*(?:tonny|tony|tommy)\b", re.IGNORECASE)
 ROUTES = {"conversation", "projects", "helpdesk", "home", "unknown"}

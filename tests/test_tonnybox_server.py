@@ -145,7 +145,7 @@ def test_transcribe_command_sets_remote_dir_and_explicit_output(monkeypatch):
     assert argv[:3] == [
         "env",
         f"TRANSCRIPTS={DEFAULT_TRANSCRIPT_DIR}",
-        "/home/delorenj/code/HeyMa/bin/transcribe",
+        "/home/delorenj/HeyMa/bin/transcribe",
     ]
     assert "--output" in argv
     assert argv[argv.index("--output") + 1] == str(DEFAULT_TRANSCRIPT_DIR / "session.md")

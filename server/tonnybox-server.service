@@ -13,7 +13,7 @@ Environment=TONNYBOX_S3_ALIAS=delo
 Environment=TONNYBOX_S3_BUCKET=tonnybox
 Environment=TONNYBOX_WORK_DIR=/home/delorenj/code/TonnyBox/agents/hermes/pm/runtime/voice-work
 Environment=TONNYBOX_TRANSCRIPT_DIR=/home/delorenj/d/Notes/TonnyTranscripts
-Environment="TONNYBOX_TRANSCRIBE_COMMAND=env TRANSCRIPTS={transcript_dir} /home/delorenj/code/HeyMa/bin/transcribe {audio_path} --device cpu --output {transcript_path}"
+Environment="TONNYBOX_TRANSCRIBE_COMMAND=env TRANSCRIPTS={transcript_dir} /home/delorenj/HeyMa/bin/transcribe {audio_path} --device cpu --output {transcript_path}"
 Environment=TONNYBOX_HERMES_MODEL=gpt-codex-5.4
 Environment=TONNYBOX_REQUIRE_WAKEWORD=false
 Environment=TONNYBOX_TONNY_REPLY_TIMEOUT_S=75
