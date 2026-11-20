@@ -82,3 +82,21 @@ reconcile:
 service_state:
   heartbeat: "retired"
   gateway: "deferred"
+company_identity:
+  version: 1
+  subject: "2b8d9296-9094-4a0c-a0a7-a1cda1f257f0"
+  handle: "tonnybox-pm"
+  email: "tonnybox-pm@agents.delo.sh"
+  status: "active"
+  enrolled_at: "2026-11-20T02:32:28.741Z"
+  bindings:
+    cloudflare_access:
+      principal: "664a561ad3cba5edba6c4a8a575c2923.access"
+      instance: "https://delonet.cloudflareaccess.com"
+      credential_ref: "op://DeLoSecrets/hll6r7dxhfyh5vqpn4okfswmbu/dezrgnzrz6euhtt7pobgoggwgm"
+    plane:
+      principal: "b16c5b4b-6d03-44af-bd5f-28cbf1d8cdff"
+      instance: "https://plane.delo.sh/33god"
+      credential_ref: "op://DeLoSecrets/r6o5h34pgakbsxe42kx3bz3ime/credential"
+      attribution_mode: "native"
+      native_actor_id: "b16c5b4b-6d03-44af-bd5f-28cbf1d8cdff"
